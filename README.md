@@ -229,20 +229,7 @@ Yes. GeneMamba falls back automatically: MPS (Apple Silicon) → CUDA → CPU. N
 
 V2 falls back to whole-genome single-block mode (slower, higher memory). Run `python preprocess/generate_chrom_boundaries.py` to generate the boundary file after preprocessing.
 
----
 
-## Citation
-
-```bibtex
-@software{GeneMamba2024,
-  author = {GeneMamba Team},
-  title = {GeneMamba: Pure Endogenous Causal State Space Model for Single-Cell Transcriptomics},
-  year = {2024},
-  url = {https://github.com/your-org/GeneMamba}
-}
-```
-
----
 
 ## License
 
