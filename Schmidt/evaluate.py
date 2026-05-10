@@ -8,7 +8,7 @@ Metrics:
   Population-distribution: Wasserstein distance, KL-divergence, Common-DEGs
 
 Usage:
-  python3 evaluate.py --checkpoint ../checkpoints/genemamba_v0.1_checkpoint.pt
+  python3 evaluate.py --checkpoint ../checkpoints/genemamba_checkpoint.pt
 """
 import argparse
 import torch

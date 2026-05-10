@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-GeneMamba V0.1 standalone do operator inference script
+GeneMamba standalone do-operator inference script
 Supports single-gene/multi-gene/pathway-level zero-shot perturbation prediction, automatically considers cis + trans effects
 """
 import torch
@@ -98,7 +98,7 @@ if __name__ == "__main__":
         freeze_gene_emb=True
     )
     from utils import load_checkpoint
-    load_checkpoint(model, "genemamba_v0_1_checkpoint.pt", device)
+    load_checkpoint(model, "genemamba_checkpoint.pt", device)
     model = model.to(device)
     # Load example cell data (take first validation cell)
     data = torch.load("data/processed_data.pt")

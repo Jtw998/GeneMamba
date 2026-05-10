@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-GeneMamba V0.1 training script.
+GeneMamba training script.
 Supports any dataset directory via GENE_DATA_DIR environment variable (set by train.py).
 """
 import os
@@ -218,7 +218,7 @@ if __name__ == "__main__":
     print(f"Frozen parameters: {frozen_params:,}")
     print(f"Model size: {total_params * 4 / 1024 / 1024:.2f} MB")
 
-    ckpt_name = f"genemamba_v0.1_{data_dir.replace('/', '_')}.pt"
+    ckpt_name = f"genemamba_{data_dir.replace('/', '_')}.pt"
     ckpt_path = f"../checkpoints/{ckpt_name}"
     print(f"Checkpoint: {ckpt_path}")
     train_model(model, train_data, val_data, gene_names, config, device=device, checkpoint_path=ckpt_path)

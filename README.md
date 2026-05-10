@@ -214,7 +214,8 @@ GeneMamba/
 │   └── losses.py                  # Loss functions (NB, sparsity, etc.)
 │
 ├── docs/                          # Technical documentation
-│   └── V0.1.md                    # Architecture, memory optimization, interface reference
+│   ├── V1.md                      # Architecture, causal proof, training config
+│   └── ARCHIVE.md                 # Chinese version of V1.md
 │
 ├── tests/                         # Debugging / profiling scripts
 ├── checkpoints/                    # Auto-saved model weights
@@ -260,7 +261,7 @@ All hyperparameters are centralized in `utils/utils.py` — edit there, no need 
 ## Documentation
 
 - [Architecture & Causal Proof](docs/V1.md)
-- [Cis-Trans Architecture & Memory Optimization](docs/V0.1.md)
+- [Architecture & Causal Proof (Chinese)](docs/ARCHIVE.md)
 - [Fourier Position Encoder Pretraining](pretrain_position/README.md)
 
 ---
