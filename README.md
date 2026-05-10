@@ -230,6 +230,51 @@ GeneMamba/
 
 Cis-trans dual branch: chromosome-block shared bidirectional Mamba2 + zero-prior global regulatory gating + Fourier position encoder.
 
+```
+                    ┌─────────────────────────────────────┐
+                    │         Input Expression             │
+                    │           [B, N_genes]               │
+                    └──────────────┬──────────────────────┘
+                                   │
+                    ┌──────────────▼──────────────────────┐
+                    │       Embedding Fusion               │
+                    │   expr_emb + scGPT_emb + pos_emb     │
+                    │           [B, N, 256]                │
+                    └──────┬───────────────────┬──────────┘
+                           │                   │
+              ┌────────────▼──────┐   ┌────────▼──────────┐
+              │   Cis Branch      │   │   Trans Branch     │
+              │                  │   │                   │
+              │  Chromosome      │   │  RegulatorGate    │
+              │  blocking        │   │  MLP(gene_emb)    │
+              │  (326 blocks)    │   │       │           │
+              │      │           │   │  Top-K selection  │
+              │  Shared BiMamba2 │   │  (K=512 active)   │
+              │  (Fwd + Rev)     │   │       │           │
+              │      │           │   │  Lightweight      │
+              │  Block fusion    │   │  attention        │
+              │      │           │   │                   │
+              │  cis_out         │   │  trans_out        │
+              │  [B, N, 256]     │   │  [B, N, 256]      │
+              └────────┬─────────┘   └────────┬──────────┘
+                       │                      │
+                       └──────────┬───────────┘
+                                  │  cis_out * (1 + tanh(trans_out))
+                    ┌─────────────▼───────────────────────┐
+                    │        VAE Latent Space              │
+                    │  latent_mean, latent_log_var         │
+                    │  [B, N, 64]                          │
+                    │       │                              │
+                    │  Reparameterization                  │
+                    │  latent_sample [B, N, 64]            │
+                    └─────────────┬───────────────────────┘
+                                  │
+                    ┌─────────────▼───────────────────────┐
+                    │     Causal Gating Output             │
+                    │     [B, N_genes]                     │
+                    └─────────────────────────────────────┘
+```
+
 - Training memory: **≤7 GB**
 - Training speed: **7–8× faster** than baseline
 - TF target gene recall: **≥80%**
