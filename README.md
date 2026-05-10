@@ -213,10 +213,6 @@ GeneMamba/
 │   ├── utils.py                   # Config, metrics, checkpoint I/O
 │   └── losses.py                  # Loss functions (NB, sparsity, etc.)
 │
-├── docs/                          # Technical documentation
-│   ├── V1.md                      # Architecture, causal proof, training config
-│   └── ARCHIVE.md                 # Chinese version of V1.md
-│
 ├── tests/                         # Debugging / profiling scripts
 ├── checkpoints/                    # Auto-saved model weights
 ├── position_table.pt              # Pretrained Fourier position lookup table
@@ -260,8 +256,6 @@ All hyperparameters are centralized in `utils/utils.py` — edit there, no need 
 
 ## Documentation
 
-- [Architecture & Causal Proof](docs/V1.md)
-- [Architecture & Causal Proof (Chinese)](docs/ARCHIVE.md)
 - [Fourier Position Encoder Pretraining](pretrain_position/README.md)
 
 ---
