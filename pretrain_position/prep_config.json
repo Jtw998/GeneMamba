@@ -1,0 +1,8 @@
+{
+  "pos_threshold": 100000,
+  "neg_threshold": 1000000,
+  "neg_ratio": 3,
+  "max_pairs": 500000,
+  "seed": 42,
+  "min_genes_per_chr": 5
+}

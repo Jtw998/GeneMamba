@@ -15,9 +15,24 @@ from utils import compute_total_loss
 from utils import config, calculate_metrics, save_checkpoint, load_checkpoint
 
 
-def create_dataloaders(train_data, val_data):
-    train_loader = DataLoader(TensorDataset(train_data), batch_size=config["batch_size"], shuffle=True)
-    val_loader = DataLoader(TensorDataset(val_data), batch_size=config["batch_size"], shuffle=False)
+def create_dataloaders(train_data, val_data, gene_names=None):
+    # gene_names: list[str] in same order as expression tensor columns
+    # We pass the SAME gene_names list to every batch (gene set is fixed during training)
+    # so we only need one copy, not per-batch copies
+    if gene_names is not None:
+        train_loader = DataLoader(
+            TensorDataset(train_data),
+            batch_size=config["batch_size"], shuffle=True,
+            collate_fn=lambda batch: (batch[0][0], gene_names),
+        )
+        val_loader = DataLoader(
+            TensorDataset(val_data),
+            batch_size=config["batch_size"], shuffle=False,
+            collate_fn=lambda batch: (batch[0][0], gene_names),
+        )
+    else:
+        train_loader = DataLoader(TensorDataset(train_data), batch_size=config["batch_size"], shuffle=True)
+        val_loader = DataLoader(TensorDataset(val_data), batch_size=config["batch_size"], shuffle=False)
     return train_loader, val_loader
 
 
@@ -30,14 +45,22 @@ def train_epoch(model, dataloader, optimizer, device):
 
     for batch in tqdm(dataloader, desc="Training"):
         expression = batch[0].to(device)
+        gene_names_list = batch[1] if len(batch) > 1 else None
         optimizer.zero_grad()
-        predictions, latent_mean, latent_log_var, latent_sample = model(expression)
+        predictions, latent_mean, latent_log_var, latent_sample = model(expression, gene_names_list=gene_names_list)
         loss, components = compute_total_loss(predictions, expression, latent_mean, latent_sample)
-        sparsity_loss = 1e-6 * torch.sum(torch.sigmoid(model.regulator_gate) ** 2)
+        # Sparsity loss: only when scGPT gene embeddings are available (enables gate computation)
+        if model.gene_embedding is not None and gene_names_list is not None:
+            cached_gene_emb = model.get_cached_gene_emb(gene_names_list)
+            gate_vals = model.regulator_gate.current_gate_vals(cached_gene_emb)
+            sparsity_loss = 1e-6 * torch.sum(gate_vals ** 2)
+        else:
+            sparsity_loss = torch.tensor(0.0, device=device)
         total_loss_total = loss + sparsity_loss
         total_loss_total.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), config["grad_clip_value"])
         optimizer.step()
+        model.regulator_gate.clear_cache()
 
         batch_idx += 1
         if batch_idx % 5 == 0 and torch.backends.mps.is_available():
@@ -68,7 +91,8 @@ def val_epoch(model, dataloader, device):
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Validation"):
             expression = batch[0].to(device)
-            predictions, latent_mean, latent_log_var, _ = model(expression)
+            gene_names_list = batch[1] if len(batch) > 1 else None
+            predictions, latent_mean, latent_log_var, _ = model(expression, gene_names_list=gene_names_list)
             loss, components = compute_total_loss(predictions, expression, latent_mean, latent_mean)
             total_loss += loss.item()
             all_predictions.append(predictions.cpu())
@@ -84,8 +108,8 @@ def val_epoch(model, dataloader, device):
     return avg_loss, loss_components, metrics
 
 
-def train_model(model, train_data, val_data, config, device, checkpoint_path):
-    train_loader, val_loader = create_dataloaders(train_data, val_data)
+def train_model(model, train_data, val_data, gene_names, config, device, checkpoint_path):
+    train_loader, val_loader = create_dataloaders(train_data, val_data, gene_names)
     optimizer = optim.AdamW(model.parameters(), lr=config["learning_rate"], weight_decay=config["weight_decay"])
     best_val_loss = float("inf")
     for epoch in range(config["num_epochs"]):
@@ -95,7 +119,11 @@ def train_model(model, train_data, val_data, config, device, checkpoint_path):
         print(f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
         print(f"Train Pearson: {train_metrics['pearson']:.4f} | Val Pearson: {val_metrics['pearson']:.4f}")
         print(f"Loss components: {val_components}")
-        num_regulators = (torch.sigmoid(model.regulator_gate) > 0.5).sum().item()
+        num_regulators = 0
+        if model.gene_embedding is not None and gene_names is not None:
+            cached = model.get_cached_gene_emb(gene_names)
+            if cached is not None:
+                num_regulators = model.regulator_gate.num_active(cached, threshold=0.5)
         print(f"Number of currently identified regulatory factors: {num_regulators}")
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -122,6 +150,23 @@ if __name__ == "__main__":
     print(f"Data directory: {data_dir}")
 
     data = torch.load(data_file)
+
+    # Load gene names (for cross-dataset embedding lookup)
+    gene_names = None
+    if "gene_names" in data and data["gene_names"] is not None:
+        # Stored as list of strings
+        gene_names = data["gene_names"]
+    elif os.path.exists(f"{data_dir}/gene_meta.csv"):
+        import pandas as pd
+        meta = pd.read_csv(f"{data_dir}/gene_meta.csv")
+        gene_names = meta["gene_name"].tolist()
+        print(f"Loaded {len(gene_names)} gene names from gene_meta.csv")
+    elif os.path.exists(f"../{data_dir}/schmidt_gene_meta.csv"):
+        import pandas as pd
+        meta = pd.read_csv(f"../{data_dir}/schmidt_gene_meta.csv")
+        gene_names = meta["gene_name"].tolist()
+        print(f"Loaded {len(gene_names)} gene names from schmidt_gene_meta.csv")
+
     if is_schmidt:
         expr = data["expression"]
         max_cells = config.get("max_train_cells", 0)
@@ -156,6 +201,7 @@ if __name__ == "__main__":
         num_genes=train_data.shape[1],
         gene_emb_dim=gene_emb.shape[1] if gene_emb is not None else 512,
         gene_emb=gene_emb,
+        gene_names=gene_names,
         freeze_gene_emb=(gene_emb is not None),
         chrom_boundaries_path=chrom_file,
         hidden_dim=config["hidden_dim"],
@@ -175,4 +221,4 @@ if __name__ == "__main__":
     ckpt_name = f"genemamba_v0.1_{data_dir.replace('/', '_')}.pt"
     ckpt_path = f"../checkpoints/{ckpt_name}"
     print(f"Checkpoint: {ckpt_path}")
-    train_model(model, train_data, val_data, config, device=device, checkpoint_path=ckpt_path)
+    train_model(model, train_data, val_data, gene_names, config, device=device, checkpoint_path=ckpt_path)

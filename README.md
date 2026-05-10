@@ -10,6 +10,7 @@
 |---------|-------------|
 | **Pure Endogenous Causality** | Trained only on scRNA-seq data. Naturally blocks backdoor paths. Observation distribution is strictly equivalent to intervention distribution. |
 | **Zero-shot Perturbation Prediction** | No intervention data during training. Directly performs counterfactual reasoning: gene knockout, overexpression, and pathway-level intervention — with native do-operator support. |
+| **Cross-Dataset Inference** | Train on one gene set, infer on another — no hardcoded `num_genes`. Dynamically adapts to any gene list at runtime. |
 | **Extreme Efficiency** | Bidirectional Mamba2 architecture. Memory ≤7GB. Training speed 7–8× faster than baseline. Supports simultaneous modeling of the full genome (>20,000 genes). |
 | **Full Platform Compatibility** | Pure PyTorch native — no CUDA, no custom operators. Seamless support for NVIDIA GPU, Apple Silicon MPS, and CPU with zero configuration changes. |
 | **High Interpretability** | Endogenously decouples chromatin accessibility amplitude Z and transcription switch S. Automatically identifies global regulatory factors. Regulatory network interpretability far exceeds black-box models. |
@@ -38,8 +39,9 @@ The `--data_dir` flag selects the dataset directory. Each dataset should provide
 - `processed_data.pt` — expression tensor with `train`/`val` keys
 - `chrom_boundaries.pt` — chromosome block boundaries
 - `gene_embeddings.pt` — scGPT embeddings (optional, auto-detected)
+- `gene_meta.csv` — gene metadata with chromosome and genomic position (for cross-dataset support)
 
-### Perturbation prediction
+### 3. Perturbation Prediction
 
 ```bash
 python inference/inference_v0.1.py
@@ -50,6 +52,8 @@ python inference/inference_v0.1.py
 ## Complete Preprocessing Pipeline
 
 All commands run from the project root. No `cd` required.
+
+The default training data is the PBS vehicle control condition from the **Parse-10M** dataset (629,701 PBMC cells × 40,352 genes, 12 human donors, 18 cell types).
 
 ### Step 1: Raw scRNA-seq Preprocessing
 
@@ -75,7 +79,7 @@ python preprocess/preprocess_data.py --input your_data.h5ad --output_dir data/
 Extracts and aligns pre-trained scGPT gene embeddings to your gene list. Supports three modes:
 
 | Mode | Flag | Behavior |
-|------|------|----------|
+|------|------|---------|
 | Zero-fill (default) | none | Unmatched genes filled with zeros |
 | Random fill | `--random-fill` | Unmatched genes initialized with small random vectors |
 | Drop unmatched (recommended) | `--drop-unmatched` | Automatically removes genes without embeddings; synchronously filters all data files for 100% alignment |
@@ -114,7 +118,57 @@ python preprocess/generate_chrom_boundaries.py
 
 ---
 
-### Perturbation Evaluation Dataset (Schmidt)
+### Optional Step 4: Fourier Position Encoder Pretraining
+
+Pretrain a genomic position encoder on gene coordinate data, then export as a lookup table for use in GeneMamba. This improves position-aware gene representations when scGPT embeddings are unavailable or as a supplement.
+
+```bash
+cd pretrain_position
+
+# Step 1: prepare data (reads gene_meta.csv, generates gene pairs)
+python prepare_data.py
+
+# Step 2: pretrain with contrastive learning
+python train.py
+
+# Step 3: export lookup table
+python export_table.py
+# Output: ../position_table.pt
+```
+
+See [`pretrain_position/README.md`](pretrain_position/README.md) for details.
+
+---
+
+## Cross-Dataset Inference Architecture
+
+GeneMamba V0.1 removes the hardcoded `num_genes` dependency from the original design. Two components were modified:
+
+### ① Dynamic Gene Embedding Lookup
+
+Instead of `nn.Embedding(num_genes, 512)` bound to a fixed gene count, embeddings are now looked up dynamically from gene names at runtime. The model accepts a `gene_names_list` parameter — different datasets can pass different gene lists, and the embedding matrix is indexed by name rather than by position.
+
+### ② Dynamic Regulator Gate (MLP)
+
+The original `nn.Parameter(torch.randn(num_genes))` for the regulator gate is replaced by a lightweight MLP that computes gate values from gene embeddings:
+
+```
+gate = sigmoid(Linear(gene_embedding)) ∈ (0, 1)
+```
+
+This is shape-invariant to gene count — the MLP always produces `[num_genes]` values regardless of how many genes are present.
+
+### Loading Old Checkpoints
+
+```python
+from models import load_with_migration
+model = load_with_migration(model, "path/to/old_checkpoint.pt")
+# Old regulator_gate is skipped (fresh MLP init); all other weights migrate automatically.
+```
+
+---
+
+## Perturbation Evaluation Dataset (Schmidt)
 
 See [`Schmidt/`](Schmidt/) for the perturbation evaluation pipeline using the Schmidt perturb-seq dataset. Train on any dataset, evaluate perturbation prediction accuracy with 6 standardized metrics.
 
@@ -124,47 +178,44 @@ See [`Schmidt/`](Schmidt/) for the perturbation evaluation pipeline using the Sc
 
 ```
 GeneMamba/
-├── train_v0.1.py                # Training entry (--data_dir flag)
-├── inference_v0.1.py          # Inference entry
+├── train_v0.1.py                 # Training entry (--data_dir flag)
+├── inference/inference_v0.1.py  # Inference entry
 │
-├── models/                      # Model definitions
-│   └── model.py               # GeneMambaV2 (cis-trans dual branch)
+├── models/                       # Model definitions
+│   └── model.py                  # GeneMambaV0_1 (cis-trans dual branch)
+│                                  # + RegulatorGate MLP (cross-dataset gate)
+│                                  # + PositionEncoder (pretrained table or Fourier fallback)
 │
-├── train/                       # Training logic
-│   └── run_training_v0.1.py   # End-to-end training script
+├── train/                         # Training logic
+│   └── run_training_v0.1.py      # End-to-end training script (gene_names aware)
 │
-├── inference/                   # Inference logic
-│   └── inference_v0.1.py
-│
-├── preprocess/                 # Data preprocessing
-│   ├── preprocess_data.py       # h5ad → model-ready tensors
-│   ├── match_gene_embeddings.py # scGPT embedding matching
+├── preprocess/                    # Data preprocessing
+│   ├── preprocess_data.py         # h5ad → model-ready tensors
+│   ├── match_gene_embeddings.py    # scGPT embedding matching
 │   └── generate_chrom_boundaries.py # Chromosome block boundaries
 │
-├── utils/                       # Shared utilities
+├── pretrain_position/             # Fourier position encoder pretraining
+│   ├── prepare_data.py            # gene_meta.csv → gene pairs
+│   ├── fourier_encoder.py         # Fourier position encoder
+│   ├── train.py                   # Contrastive learning training
+│   └── export_table.py            # Export position_table.pt
 │
-├── utils/                       # Shared utilities
-│   ├── utils.py                 # Config, metrics, checkpoint I/O
-│   └── losses.py                # Loss functions (NB, sparsity, etc.)
+├── utils/                         # Shared utilities
+│   ├── utils.py                   # Config, metrics, checkpoint I/O
+│   └── losses.py                  # Loss functions (NB, sparsity, etc.)
 │
-├── docs/                        # Technical documentation
-│   └── V0.1.md               # Architecture, memory optimization, interface reference
+├── docs/                          # Technical documentation
+│   └── V0.1.md                    # Architecture, memory optimization, interface reference
 │
-├── tests/                       # Debugging / profiling scripts
-├── checkpoints/                 # Auto-saved model weights
-└── data/                        # Preprocessed data (auto-created)
-    ├── processed_data.pt       # Train/val expression tensors
-    ├── gene_meta.csv           # Gene metadata
-    ├── gene_embeddings.pt      # scGPT embeddings
-    └── chrom_boundaries.pt     # Chromosome block indices
-└── Schmidt/                    # Perturbation evaluation dataset
-    ├── preprocess.py            # Preprocessing (h5ad → model format + embeddings)
-    ├── evaluate.py             # 6-metric evaluation script
-    ├── schmidt_data.pt        # Expression tensor
-    ├── schmidt_gene_meta.csv # Gene metadata
-    ├── schmidt_chrom_boundaries.pt  # Chromosome block boundaries
-    ├── schmidt_perturb_labels.pt     # Perturbation labels
-    └── schmidt_gene_embeddings.pt    # scGPT embeddings
+├── tests/                         # Debugging / profiling scripts
+├── checkpoints/                    # Auto-saved model weights
+└── data/                          # Preprocessed data (auto-created)
+    ├── processed_data.pt          # Train/val expression tensors
+    ├── gene_meta.csv             # Gene metadata
+    ├── gene_embeddings.pt        # scGPT embeddings
+    ├── chrom_boundaries.pt       # Chromosome block indices
+    └── position_table.pt         # (optional) Pretrained Fourier position lookup table
+└── Schmidt/                      # Perturbation evaluation dataset
 ```
 
 ---
@@ -177,7 +228,7 @@ Cis-trans dual branch: chromosome-block shared bidirectional Mamba2 + zero-prior
 - Training speed: **7–8× faster** than baseline
 - TF target gene recall: **≥80%**
 - Cross-chromosome false positives: **>50% reduction**
-- New parameters: +21,900 (<0.2%, no overfitting risk)
+- New cross-dataset parameters: `RegulatorGate` MLP ≈ **33k** parameters (<0.2% of total, no overfitting risk)
 
 ---
 
@@ -200,6 +251,7 @@ All hyperparameters are centralized in `utils/utils.py` — edit there, no need 
 
 - [V1 Technical Documentation](docs/V1.md) — architecture, causal proof, loss functions, training config
 - [Technical Documentation](docs/V0.1.md) — cis-trans architecture, memory optimization, interface reference
+- [Fourier Position Encoder Pretraining](pretrain_position/README.md) — contrastive learning for genomic position embeddings
 
 ---
 
@@ -225,11 +277,25 @@ python preprocess/match_gene_embeddings.py --scgpt_dir /path/to/scgpt --drop-unm
 
 Yes. GeneMamba falls back automatically: MPS (Apple Silicon) → CUDA → CPU. No code changes needed.
 
+### Can I train on one dataset and infer on another with different genes?
+
+Yes. Pass `gene_names_list` to the model forward call. The `RegulatorGate` MLP and dynamic embedding lookup are shape-invariant to gene count. See "Cross-Dataset Inference Architecture" above.
+
 ### What if chromosome boundaries fail to load?
 
 V2 falls back to whole-genome single-block mode (slower, higher memory). Run `python preprocess/generate_chrom_boundaries.py` to generate the boundary file after preprocessing.
 
+### How do I use the pretrained Fourier position encoder?
 
+```bash
+python pretrain_position/prepare_data.py   # generates gene pairs
+python pretrain_position/train.py            # trains the encoder
+python pretrain_position/export_table.py     # exports position_table.pt
+```
+
+Then in your training script, pass `position_table_path="position_table.pt"` to `GeneMambaV0_1`. See `pretrain_position/README.md` for details.
+
+---
 
 ## License
 

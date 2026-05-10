@@ -11,8 +11,8 @@ from torch import Tensor
 from einops import rearrange, repeat
 import math
 import os
-from typing import Tuple
-from torch.utils.checkpoint import checkpoint  # Add gradient checkpointing
+from typing import Tuple, List, Optional
+from torch.utils.checkpoint import checkpoint
 
 def silu(x):
     """Applies the Sigmoid Linear Unit (SiLU), element-wise."""
@@ -186,6 +186,148 @@ def run_mamba_layers(layers, x):
     return x
 
 # --------------------------
+# Cross-dataset support components
+# --------------------------
+
+class RegulatorGate(nn.Module):
+    """
+    Dynamic regulator gate: MLP over gene embeddings + lazy cache.
+    Replaces the old fixed-size nn.Parameter(torch.randn(num_genes)).
+    Shape is always [num_genes] regardless of gene count — cross-dataset compatible.
+    """
+    def __init__(self, gene_emb_dim: int, hidden_dim: int = 64):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(gene_emb_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, 1),
+        )
+        # Small-weight init: make initial output ≈ 0.01, matching original gate behavior
+        with torch.no_grad():
+            self.mlp[-1].weight.mul_(0.01)
+            self.mlp[-1].bias.zero_()
+        self._cache = {}
+
+    def forward(self, gene_emb: Tensor, gene_set_key: int = None) -> Tensor:
+        """
+        gene_emb:       [num_genes, gene_emb_dim] current dataset gene embeddings
+        gene_set_key:   cache key (e.g. id(tuple(gene_names)))
+        returns:        [num_genes] gate values in (0, 1)
+        """
+        if gene_set_key is not None and gene_set_key in self._cache:
+            return self._cache[gene_set_key]
+        gate_vals = self.mlp(gene_emb).squeeze(-1)
+        if gene_set_key is not None:
+            self._cache[gene_set_key] = gate_vals.detach()
+        return gate_vals
+
+    def clear_cache(self):
+        """Call once per training epoch (MLP weights are updating)."""
+        self._cache = {}
+
+    def current_gate_vals(self, gene_emb_for_gate: Tensor) -> Tensor:
+        """Return current gate values for sparsity loss. Computed fresh (no cache)."""
+        return self.mlp(gene_emb_for_gate).squeeze(-1)
+
+    def num_active(self, gene_emb_for_gate: Tensor, threshold: float = 0.5) -> int:
+        """Count how many genes have gate > threshold (for logging)."""
+        return int((self.current_gate_vals(gene_emb_for_gate) > threshold).sum())
+
+
+class PositionEncoder(nn.Module):
+    """
+    Two-mode position encoder:
+      A. (recommended) Load pretrained position_table.pt, lookup
+      B. (fallback)   Compute Fourier on-the-fly from genomic coordinates
+
+    Gate fusion with bias=-2: σ(-2)≈0.12 — position info initially suppressed,
+    gradually opened during training to avoid disrupting learned features.
+    """
+    def __init__(
+        self,
+        position_table_path: Optional[str] = None,
+        gene_emb_dim: int = 512,
+        hidden_dim: int = 256,
+    ):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.fallback_mode = position_table_path is None
+        self.pos_embedding = None
+
+        if not self.fallback_mode and os.path.exists(position_table_path):
+            table_data = torch.load(position_table_path, map_location="cpu")
+            raw_table = table_data["table"]   # dict: gene_name → [embed_dim]
+            self.pos_embed_dim = table_data.get("embed_dim", 256)
+            gene_names = sorted(raw_table.keys())
+            self.pos_gene_to_idx = {g: i for i, g in enumerate(gene_names)}
+            matrix = torch.stack([
+                raw_table[g] if isinstance(raw_table[g], torch.Tensor)
+                else torch.tensor(raw_table[g])
+                for g in gene_names
+            ])
+            self.pos_embedding = nn.Embedding.from_pretrained(matrix, freeze=True)
+            self.pos_proj = nn.Linear(self.pos_embed_dim, hidden_dim, bias=False)
+            print(f"PositionEncoder: loaded pretrained table ({len(gene_names)} genes, dim={self.pos_embed_dim})")
+        else:
+            self.pos_embedding = None
+            self._build_fallback_fourier(gene_emb_dim, hidden_dim)
+            print("PositionEncoder: fallback mode (no pretrained table)")
+
+        # Gated fusion: initial gate ≈ 0.12 (position info suppressed at start)
+        self.gate = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Sigmoid(),
+        )
+        with torch.no_grad():
+            self.gate[0].weight.zero_()
+            self.gate[0].bias.fill_(-2.0)
+
+    def _build_fallback_fourier(self, input_dim: int, embed_dim: int):
+        num_freqs = 16
+        freqs = [1.0 * (2.0 ** k) for k in range(num_freqs)]
+        self.register_buffer("fourier_freqs", torch.tensor(freqs, dtype=torch.float32))
+        fourier_dim = input_dim * num_freqs * 2
+        self.fallback_proj = nn.Sequential(
+            nn.Linear(fourier_dim, embed_dim),
+            nn.GELU(),
+            nn.Linear(embed_dim, embed_dim),
+        )
+        self.pos_embed_dim = embed_dim
+
+    def forward(
+        self,
+        gene_embed: Tensor,
+        gene_names_list: Optional[List[str]] = None,
+        gene_coords: Optional[Tensor] = None,
+    ) -> Tensor:
+        """
+        gene_embed:       [batch_size, num_genes, hidden_dim] current model embeddings
+        gene_names_list:  [num_genes] gene name list (for mode A lookup)
+        gene_coords:      [num_genes, 3] (chrom_idx, tss_norm, strand) (for mode B)
+        returns:          [batch_size, num_genes, hidden_dim] position-enhanced embeddings
+        """
+        if self.pos_embedding is not None and gene_names_list is not None:
+            indices = torch.tensor(
+                [self.pos_gene_to_idx.get(g, 0) for g in gene_names_list],
+                device=gene_embed.device,
+            )
+            pos_emb = self.pos_proj(self.pos_embedding(indices))
+        elif gene_coords is not None:
+            x = gene_coords.to(gene_embed.device).unsqueeze(-1)
+            angles = 2 * math.pi * x * self.fourier_freqs
+            fourier = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)
+            fourier = fourier.reshape(gene_coords.shape[0], -1)
+            pos_emb = self.fallback_proj(fourier)
+        else:
+            return gene_embed
+
+        pos_emb = pos_emb.unsqueeze(0).expand(gene_embed.size(0), -1, -1)
+        gate_input = torch.cat([gene_embed, pos_emb], dim=-1)
+        gate_val = self.gate(gate_input)
+        return gene_embed + gate_val * pos_emb
+
+
+# --------------------------
 # Main model class
 # --------------------------
 class GeneMambaV0_1(nn.Module):
@@ -194,11 +336,13 @@ class GeneMambaV0_1(nn.Module):
         num_genes: int,
         gene_emb_dim: int = 512,
         gene_emb: torch.Tensor = None,
+        gene_names: Optional[List[str]] = None,
         freeze_gene_emb: bool = True,
         chrom_boundaries_path: str = "data/chrom_boundaries.pt",
         max_regulators: int = 512,
         hidden_dim: int = 128,
-        num_mamba_layers: int = 2
+        num_mamba_layers: int = 2,
+        position_table_path: Optional[str] = None,
     ):
         super().__init__()
         self.num_genes = num_genes
@@ -214,13 +358,14 @@ class GeneMambaV0_1(nn.Module):
         # scGPT gene embedding (optional)
         self.gene_embedding = None
         self.gene_emb_projection = None
+        self.gene_name_to_idx = {}   # gene_name → scGPT vocab index (no register_buffer!)
+        self._cached_gene_emb = None  # lazily cached gene embeddings for this dataset
         if gene_emb is not None:
-            # Load pre-trained gene embeddings
             self.gene_embedding = nn.Embedding.from_pretrained(gene_emb, freeze=freeze_gene_emb)
-            # Project to unified latent space
             self.gene_emb_projection = nn.Linear(gene_emb_dim, self.hidden_dim)
-            # Fixed gene indices, strictly aligned with data order
-            self.register_buffer("gene_indices", torch.arange(num_genes))
+            # Build name→index mapping if gene names are provided
+            if gene_names is not None:
+                self.gene_name_to_idx = {name: i for i, name in enumerate(gene_names)}
 
         # V1 Mamba configuration parameters, exactly same as original model
         self.num_mamba_layers = num_mamba_layers
@@ -281,9 +426,18 @@ class GeneMambaV0_1(nn.Module):
         self.output_projection = nn.Linear(self.hidden_dim, 1)
 
         # --------------------------
-        # Add: zero-prior trans branch (only 22k parameters, <0.2% of total)
+        # Zero-prior trans branch (cross-dataset compatible)
         # --------------------------
-        self.regulator_gate = nn.Parameter(torch.randn(num_genes) * 0.01)  # Smaller initialization to avoid training oscillation
+        # Old: nn.Parameter(torch.randn(num_genes)) — hardcoded to num_genes
+        # New: MLP over scGPT embeddings — shape always [num_genes] regardless of gene count
+        self.regulator_gate = RegulatorGate(gene_emb_dim, hidden_dim=64)
+
+        # Optional position encoder (pretrained lookup table or fallback Fourier)
+        self.position_encoder = PositionEncoder(
+            position_table_path=position_table_path,
+            gene_emb_dim=gene_emb_dim,
+            hidden_dim=hidden_dim,
+        )
 
         # --------------------------
         # Load chromosome boundaries with strict validation
@@ -308,16 +462,23 @@ class GeneMambaV0_1(nn.Module):
             self.chrom_boundaries = [(0, num_genes)]
             print("Warning: Chromosome boundary file {} does not exist, using whole genome single block mode".format(chrom_boundaries_path))
 
-    def forward(self, expression: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(
+        self,
+        expression: torch.Tensor,
+        gene_names_list: Optional[List[str]] = None,
+        gene_coords: Optional[Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Forward propagation, interface fully compatible with original GeneMamba
+        Forward propagation.
         Args:
-            expression: [batch_size, num_genes] Input gene expression matrix
+            expression:        [batch_size, num_genes] Input gene expression matrix
+            gene_names_list:  [num_genes] gene name list for cross-dataset embedding lookup
+            gene_coords:       [num_genes, 3] (chrom_idx, tss_norm, strand) for fallback Fourier mode
         Returns:
-            predicted_expression: [batch_size, num_genes] Predicted gene expression values
-            latent_mean: [batch_size, num_genes, latent_dim] Latent variable mean (aligned with V1, 3-dimensional)
-            latent_log_var: [batch_size, num_genes, latent_dim] Latent variable log variance (aligned with V1, 3-dimensional)
-            latent_sample: [batch_size, num_genes, latent_dim] Reparameterized sampled latent variable
+            predicted_expression: [batch_size, num_genes]
+            latent_mean:          [batch_size, num_genes, latent_dim]
+            latent_log_var:       [batch_size, num_genes, latent_dim]
+            latent_sample:        [batch_size, num_genes, latent_dim]
         """
         batch_size, num_genes = expression.shape
 
@@ -328,15 +489,33 @@ class GeneMambaV0_1(nn.Module):
         x = expression.unsqueeze(-1)
         x = self.expression_embedding(x)
 
+        # Cache key for gene embedding lookup (must be content-based, not id-based!)
+        cache_key = hash(tuple(gene_names_list)) if gene_names_list else None
+        gene_emb_for_gate = None  # will be set inside the if block below
+
         # Fuse scGPT gene semantic embedding (if available)
         if self.gene_embedding is not None:
-            # Get pre-trained embeddings for all genes [num_genes, gene_emb_dim] → Project to unified latent space [num_genes, hidden_dim]
-            gene_emb = self.gene_embedding(self.gene_indices)
-            gene_emb = self.gene_emb_projection(gene_emb)
-            # Broadcast to entire batch dimension [1, num_genes, hidden_dim] → [batch_size, num_genes, hidden_dim]
+            # Cache gene embeddings per dataset (same gene set → no recompute)
+            if self._cached_gene_emb is None or cache_key not in self._cached_gene_emb:
+                indices = torch.tensor(
+                    [self.gene_name_to_idx.get(g, 0) for g in gene_names_list],
+                    device=expression.device,
+                )
+                gene_emb_raw = self.gene_embedding(indices)   # [num_genes, gene_emb_dim] — raw scGPT emb
+                gene_emb = self.gene_emb_projection(gene_emb_raw)  # [num_genes, hidden_dim] — projected emb
+                # Cache raw scGPT embeddings for regulator gate (gate uses gene identity, not projected)
+                if self._cached_gene_emb is None:
+                    self._cached_gene_emb = {}
+                self._cached_gene_emb[cache_key] = gene_emb_raw.detach()
+            else:
+                gene_emb_raw = self._cached_gene_emb[cache_key].to(expression.device)  # re-project from cached raw emb
+                gene_emb = self.gene_emb_projection(gene_emb_raw)
+            gene_emb_for_gate = gene_emb_raw  # for trans branch gate
             gene_emb = gene_emb.unsqueeze(0).expand(batch_size, -1, -1)
-            # Semantic fusion: expression feature + gene functional semantic feature
             x = x + gene_emb
+
+        # Optional position encoding (pretrained table or fallback Fourier)
+        x = self.position_encoder(x, gene_names_list=gene_names_list, gene_coords=gene_coords)
 
         # --------------------------
         # Cis branch: chromosome-blocked shared Mamba processing (memory optimized version: pre-allocate output, immediate release)
@@ -369,13 +548,22 @@ class GeneMambaV0_1(nn.Module):
                 torch.mps.empty_cache()
 
         # --------------------------
-        # Trans branch: zero-prior global regulatory effect learning, V2 new feature (memory optimized version)
+        # Trans branch: zero-prior global regulatory effect learning
+        # Cross-dataset compatible: gate computed from scGPT embeddings (MLP).
+        # When gene_embedding is unavailable, gate = 1.0 (no sparsity constraint).
         # --------------------------
-        regulator_gate_vals = torch.sigmoid(self.regulator_gate)  # [num_genes] 0-1 sparse gating
+        if self.gene_embedding is not None and gene_emb_for_gate is not None:
+            regulator_gate_vals = self.regulator_gate(
+                gene_emb_for_gate,
+                gene_set_key=cache_key if gene_names_list else None,
+            )
+        else:
+            # No scGPT embeddings: gate has no learned signal, use neutral value
+            regulator_gate_vals = torch.ones(num_genes, device=x.device)
 
         if self.training:
             # Training phase: fixed Top-K regulators, ensure K is fixed, memory is predictable, avoid OOM caused by K≈N in initial phase
-            topk_vals, topk_idx = torch.topk(regulator_gate_vals, self.max_regulators)
+            topk_vals, topk_idx = torch.topk(regulator_gate_vals, min(self.max_regulators, num_genes))
             # Construct sparse mask, gradients can flow normally
             mask = torch.zeros_like(regulator_gate_vals)
             mask[topk_idx] = 1.0
@@ -417,7 +605,61 @@ class GeneMambaV0_1(nn.Module):
 
         return predicted_expression, latent_mean, latent_log_var, latent_sample
 
-    # Optional: get list of model-identified regulatory genes
-    def get_regulator_genes(self, threshold: float = 0.5) -> torch.Tensor:
-        """Return regulatory gene indices with gating value > threshold"""
-        return torch.where(torch.sigmoid(self.regulator_gate) > threshold)[0]
+    def get_cached_gene_emb(self, gene_names_list: List[str]) -> Optional[Tensor]:
+        """Return cached raw scGPT gene embeddings for a given gene list (for sparsity loss)."""
+        cache_key = hash(tuple(gene_names_list)) if gene_names_list else None
+        if hasattr(self, '_cached_gene_emb') and self._cached_gene_emb:
+            return self._cached_gene_emb.get(cache_key)
+        return None
+
+    def get_regulator_genes(
+        self,
+        gene_names_list: List[str],
+        threshold: float = 0.5,
+    ) -> torch.Tensor:
+        """Return regulatory gene indices with gating value > threshold.
+
+        Requires gene_names_list to look up cached embeddings.
+        Must be called after at least one forward pass (populates the cache).
+        """
+        cache_key = id(tuple(gene_names_list))
+        cached_emb = None
+        if hasattr(self, '_cached_gene_emb') and self._cached_gene_emb:
+            cached_emb = self._cached_gene_emb.get(cache_key)
+        if cached_emb is None:
+            raise RuntimeError(
+                "gene_embeddings not cached. Run forward() with gene_names_list "
+                "before calling get_regulator_genes()."
+            )
+        gate_vals = self.regulator_gate(cached_emb.to(self.expression_embedding.weight.device))
+        return torch.where(gate_vals > threshold)[0]
+
+
+def load_with_migration(model: nn.Module, old_checkpoint_path: str) -> nn.Module:
+    """
+    Load an old-format checkpoint into a new cross-dataset compatible model.
+
+    Old format: regulator_gate = nn.Parameter(torch.randn(num_genes))
+    New format: regulator_gate = RegulatorGate(gene_emb_dim, hidden_dim=64)
+
+    The old regulator_gate cannot be migrated — it is skipped (MLP uses fresh init).
+    All other parameters are migrated if shapes match.
+    """
+    old_state = torch.load(old_checkpoint_path, map_location="cpu")
+    new_state = model.state_dict()
+    migrated, skipped = {}, []
+
+    for key, value in old_state.items():
+        if key == "regulator_gate":
+            skipped.append(key)
+            continue
+        if key in new_state and new_state[key].shape == value.shape:
+            migrated[key] = value
+        else:
+            skipped.append(key)
+
+    new_state.update(migrated)
+    model.load_state_dict(new_state, strict=False)
+    print(f"[load_with_migration] Migrated: {len(migrated)} params | Skipped: {skipped}")
+    return model
+
