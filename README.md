@@ -259,17 +259,17 @@ All hyperparameters are centralized in `utils/utils.py` — edit there, no need 
 
 ## Documentation
 
-- [V1 Technical Documentation](docs/V1.md) — architecture, causal proof, loss functions, training config
-- [Technical Documentation](docs/V0.1.md) — cis-trans architecture, memory optimization, interface reference
-- [Fourier Position Encoder Pretraining](pretrain_position/README.md) — contrastive learning for genomic position embeddings
+- [Architecture & Causal Proof](docs/V1.md)
+- [Cis-Trans Architecture & Memory Optimization](docs/V0.1.md)
+- [Fourier Position Encoder Pretraining](pretrain_position/README.md)
 
 ---
 
 ## Frequently Asked Questions
 
-### V2 training runs out of memory (OOM)
+### Training runs out of memory (OOM)
 
-V2 is designed for ≤7 GB with default settings. If you hit OOM:
+GeneMamba is designed for ≤7 GB with default settings. If you hit OOM:
 
 1. Reduce `batch_size` in `utils/utils.py` (default 16 → try 8 or 4)
 2. Reduce `max_regulators` at model initialization (default 512 → try 256 or 128)
@@ -293,7 +293,7 @@ Yes. Pass `gene_names_list` to the model forward call. The `RegulatorGate` MLP a
 
 ### What if chromosome boundaries fail to load?
 
-V2 falls back to whole-genome single-block mode (slower, higher memory). Run `python preprocess/generate_chrom_boundaries.py` to generate the boundary file after preprocessing.
+The model falls back to whole-genome single-block mode (slower, higher memory). Run `python preprocess/generate_chrom_boundaries.py` to generate the boundary file after preprocessing.
 
 ### How do I use the pretrained Fourier position encoder?
 
