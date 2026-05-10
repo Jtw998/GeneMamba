@@ -4,7 +4,7 @@ Debug memory usage of GeneMamba model, printing memory at each stage.
 """
 import torch
 import sys
-from models import GeneMambaV0_1
+from models import GeneMamba
 
 def print_memory(stage: str):
     """Print current GPU memory usage."""
@@ -31,7 +31,7 @@ def main():
 
     # 1. Model init
     print_memory("before_model_init")
-    model = GeneMambaV0_1(num_genes=num_genes)
+    model = GeneMamba(num_genes=num_genes)
     model = model.to(device)
     print(f"max_regulators: {model.max_regulators}")
     print_memory("after_model_init")

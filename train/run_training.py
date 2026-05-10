@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 GeneMamba V0.1 training script.
-Supports any dataset directory via GENE_DATA_DIR environment variable (set by train_v0.1.py).
+Supports any dataset directory via GENE_DATA_DIR environment variable (set by train.py).
 """
 import os
 import torch
@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 from typing import Dict, Tuple
 
-from models import GeneMambaV0_1
+from models import GeneMamba
 from utils import compute_total_loss
 from utils import config, calculate_metrics, save_checkpoint, load_checkpoint
 
@@ -197,7 +197,7 @@ if __name__ == "__main__":
     print(f"Training set: {train_data.shape[0]} cells x {train_data.shape[1]} genes")
     print(f"Validation set: {val_data.shape[0]} cells x {val_data.shape[1]} genes")
 
-    model = GeneMambaV0_1(
+    model = GeneMamba(
         num_genes=train_data.shape[1],
         gene_emb_dim=gene_emb.shape[1] if gene_emb is not None else 512,
         gene_emb=gene_emb,

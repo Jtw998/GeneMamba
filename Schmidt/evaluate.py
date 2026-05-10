@@ -20,7 +20,7 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from models import GeneMambaV0_1
+from models import GeneMamba
 from utils import load_checkpoint
 
 
@@ -116,7 +116,7 @@ def main():
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     print(f"Device: {device}")
 
-    model = GeneMambaV0_1(
+    model = GeneMamba(
         num_genes=expr.shape[1],
         gene_emb_dim=gene_emb_dim,
         gene_emb=gene_emb,

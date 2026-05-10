@@ -20,9 +20,9 @@ import numpy as np
 import pandas as pd
 
 CONFIG = {
-    "pos_threshold": 100_000,   # < 100kb → positive
-    "neg_threshold": 1_000_000,  # > 1Mb → negative
-    "neg_ratio": 3,              # negative : positive ratio
+    "pos_threshold": 50_000,    # < 50kb → positive (tighter proximity)
+    "neg_threshold": 2_000_000, # > 2Mb → negative (clearer far-apart)
+    "neg_ratio": 2,              # negative : positive ratio
     "max_pairs": 500_000,
     "seed": 42,
     "min_genes_per_chr": 5,    # skip chromosomes with fewer genes

@@ -29,10 +29,10 @@ pip install torch einops pandas scanpy mygene
 
 ```bash
 # Default dataset (data/):
-python train_v0.1.py
+python train.py
 
 # Custom dataset:
-python train_v0.1.py --data_dir /path/to/your/dataset
+python train.py --data_dir /path/to/your/dataset
 ```
 
 The `--data_dir` flag selects the dataset directory. Each dataset should provide:
@@ -44,7 +44,7 @@ The `--data_dir` flag selects the dataset directory. Each dataset should provide
 ### 3. Perturbation Prediction
 
 ```bash
-python inference/inference_v0.1.py
+python inference/inference.py
 ```
 
 ---
@@ -120,20 +120,29 @@ python preprocess/generate_chrom_boundaries.py
 
 ### Optional Step 4: Fourier Position Encoder Pretraining
 
-Pretrain a genomic position encoder on gene coordinate data, then export as a lookup table for use in GeneMamba. This improves position-aware gene representations when scGPT embeddings are unavailable or as a supplement.
+Pretrain a genomic position encoder on gene coordinate data with contrastive learning, then export as a lookup table for GeneMamba. This provides position-aware gene representations that complement scGPT embeddings.
+
+**Data:** Gene pairs generated from `gene_meta.csv`. Positive pairs = genes within 50kb; negative pairs = genes over 2Mb apart. ~55k pairs across ~20k genes from the PBS dataset.
+
+**Config** (`pretrain_position/train.py`):
+- Fourier encoder: 16 frequencies, embed_dim=256, f0=1.0, sigma=2.0
+- Contrastive: temperature=0.1, λ_dist=0.3, λ_uniform=0.1
+- Training: batch_size=512, num_epochs=50, lr=1e-3 (CosineAnnealing)
+
+**Expected result:** Validation gap (PosSim − NegSim) ≥ 0.80. Trained model achieves ~0.85.
 
 ```bash
 cd pretrain_position
 
-# Step 1: prepare data (reads gene_meta.csv, generates gene pairs)
+# Step 1: prepare gene pairs from gene_meta.csv
 python prepare_data.py
 
-# Step 2: pretrain with contrastive learning
+# Step 2: pretrain with contrastive learning (~8 min on MPS)
 python train.py
 
 # Step 3: export lookup table
 python export_table.py
-# Output: ../position_table.pt
+# Output: ../position_table.pt (~26 MB, 20k genes × 256d)
 ```
 
 See [`pretrain_position/README.md`](pretrain_position/README.md) for details.
@@ -142,7 +151,7 @@ See [`pretrain_position/README.md`](pretrain_position/README.md) for details.
 
 ## Cross-Dataset Inference Architecture
 
-GeneMamba V0.1 removes the hardcoded `num_genes` dependency from the original design. Two components were modified:
+GeneMamba removes the hardcoded `num_genes` dependency from the original design. Two components were modified:
 
 ### ① Dynamic Gene Embedding Lookup
 
@@ -178,16 +187,16 @@ See [`Schmidt/`](Schmidt/) for the perturbation evaluation pipeline using the Sc
 
 ```
 GeneMamba/
-├── train_v0.1.py                 # Training entry (--data_dir flag)
-├── inference/inference_v0.1.py  # Inference entry
+├── train.py                 # Training entry (--data_dir flag)
+├── inference/inference.py  # Inference entry
 │
 ├── models/                       # Model definitions
-│   └── model.py                  # GeneMambaV0_1 (cis-trans dual branch)
+│   └── model.py                  # GeneMamba (cis-trans dual branch)
 │                                  # + RegulatorGate MLP (cross-dataset gate)
 │                                  # + PositionEncoder (pretrained table or Fourier fallback)
 │
 ├── train/                         # Training logic
-│   └── run_training_v0.1.py      # End-to-end training script (gene_names aware)
+│   └── run_training.py      # End-to-end training script (gene_names aware)
 │
 ├── preprocess/                    # Data preprocessing
 │   ├── preprocess_data.py         # h5ad → model-ready tensors
@@ -209,12 +218,12 @@ GeneMamba/
 │
 ├── tests/                         # Debugging / profiling scripts
 ├── checkpoints/                    # Auto-saved model weights
-└── data/                          # Preprocessed data (auto-created)
-    ├── processed_data.pt          # Train/val expression tensors
-    ├── gene_meta.csv             # Gene metadata
-    ├── gene_embeddings.pt        # scGPT embeddings
-    ├── chrom_boundaries.pt       # Chromosome block indices
-    └── position_table.pt         # (optional) Pretrained Fourier position lookup table
+├── position_table.pt              # Pretrained Fourier position lookup table
+├── data/                          # Preprocessed data (auto-created)
+│   ├── processed_data.pt          # Train/val expression tensors
+│   ├── gene_meta.csv             # Gene metadata
+│   ├── gene_embeddings.pt        # scGPT embeddings
+│   └── chrom_boundaries.pt       # Chromosome block indices
 └── Schmidt/                      # Perturbation evaluation dataset
 ```
 
@@ -222,13 +231,14 @@ GeneMamba/
 
 ## Architecture
 
-Cis-trans dual branch: chromosome-block shared bidirectional Mamba2 + zero-prior global regulatory gating.
+Cis-trans dual branch: chromosome-block shared bidirectional Mamba2 + zero-prior global regulatory gating + Fourier position encoder.
 
 - Training memory: **≤7 GB**
 - Training speed: **7–8× faster** than baseline
 - TF target gene recall: **≥80%**
 - Cross-chromosome false positives: **>50% reduction**
-- New cross-dataset parameters: `RegulatorGate` MLP ≈ **33k** parameters (<0.2% of total, no overfitting risk)
+- Cross-dataset parameters: `RegulatorGate` MLP ≈ **33k** parameters (<0.2% of total)
+- Position encoder: **256d Fourier** (16 frequencies), pretrained with contrastive learning (Gap ≥ 0.80)
 
 ---
 
@@ -263,7 +273,7 @@ V2 is designed for ≤7 GB with default settings. If you hit OOM:
 
 1. Reduce `batch_size` in `utils/utils.py` (default 16 → try 8 or 4)
 2. Reduce `max_regulators` at model initialization (default 512 → try 256 or 128)
-3. On Apple Silicon, enable MPS fallback: `PYTORCH_ENABLE_MPS_FALLBACK=1 python train_v0.1.py`
+3. On Apple Silicon, enable MPS fallback: `PYTORCH_ENABLE_MPS_FALLBACK=1 python train.py`
 
 ### Gene count mismatch between data and embeddings
 
@@ -293,7 +303,7 @@ python pretrain_position/train.py            # trains the encoder
 python pretrain_position/export_table.py     # exports position_table.pt
 ```
 
-Then in your training script, pass `position_table_path="position_table.pt"` to `GeneMambaV0_1`. See `pretrain_position/README.md` for details.
+Then in your training script, pass `position_table_path="position_table.pt"` to `GeneMamba`. See `pretrain_position/README.md` for details.
 
 ---
 

@@ -77,9 +77,9 @@ Best model is saved when Gap is maximized.
 ## Loading into GeneMamba
 
 ```python
-from models import GeneMambaV0_1
+from models import GeneMamba
 
-model = GeneMambaV0_1(
+model = GeneMamba(
     num_genes=...,
     gene_emb_dim=...,
     gene_emb=...,

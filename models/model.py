@@ -330,7 +330,7 @@ class PositionEncoder(nn.Module):
 # --------------------------
 # Main model class
 # --------------------------
-class GeneMambaV0_1(nn.Module):
+class GeneMamba(nn.Module):
     def __init__(
         self,
         num_genes: int,

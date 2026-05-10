@@ -145,11 +145,11 @@ class PositionPreTrainer:
         )
         self.train_loader = DataLoader(
             train_ds, batch_size=config["batch_size"], shuffle=True,
-            num_workers=4, pin_memory=True,
+            num_workers=0, pin_memory=False,
         )
         self.val_loader = DataLoader(
             val_ds, batch_size=config["batch_size"], shuffle=False,
-            num_workers=4, pin_memory=True,
+            num_workers=0, pin_memory=False,
         )
 
         print(f"Encoder params: {sum(p.numel() for p in self.encoder.parameters()):,}")
@@ -214,7 +214,7 @@ class PositionPreTrainer:
         return pos_sim, neg_sim
 
     def train(self):
-        best_val = float("inf")
+        best_val = float("-inf")
         output_dir = Path(self.cfg["output_dir"])
         ckpt_dir = output_dir / "checkpoints"
         ckpt_dir.mkdir(exist_ok=True)

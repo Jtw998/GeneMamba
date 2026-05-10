@@ -1,2 +1,2 @@
-from .model import GeneMambaV0_1, RegulatorGate, PositionEncoder, load_with_migration
-__all__ = ['GeneMambaV0_1', 'RegulatorGate', 'PositionEncoder', 'load_with_migration']
+from .model import GeneMamba, RegulatorGate, PositionEncoder, load_with_migration
+__all__ = ['GeneMamba', 'RegulatorGate', 'PositionEncoder', 'load_with_migration']

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-GeneMamba V0.1 training entry.
+GeneMamba training entry.
 Usage:
-  python train_v0.1.py                        # default: ../data
-  python train_v0.1.py --data_dir Schmidt   # use Schmidt dataset
+  python train.py                        # default: ../data
+  python train.py --data_dir Schmidt   # use Schmidt dataset
 """
 import os
 import sys
@@ -23,4 +23,4 @@ else:
     os.environ["GENE_DATA_DIR"] = "../data"
 
 os.chdir(root_dir + "/train")
-exec(open("run_training_v0.1.py").read())
+exec(open("run_training.py").read())
