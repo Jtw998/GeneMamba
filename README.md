@@ -1,25 +1,12 @@
-# GeneMamba: Pure Endogenous Causal State Space Model for Single-Cell Transcriptomics
+# GeneMamba: Causal State Space Model for Single-Cell Transcriptomics
 
-> Zero-shot counterfactual perturbation prediction from scRNA-seq alone — no multi-modal paired data, no ATAC-seq required. Full-platform compatible: NVIDIA GPU, Apple Silicon MPS, and CPU.
-
----
-
-## Core Advantages
-
-| Feature | Description |
-|---------|-------------|
-| **Pure Endogenous Causality** | Trained only on scRNA-seq data. Naturally blocks backdoor paths. Observation distribution is strictly equivalent to intervention distribution. |
-| **Zero-shot Perturbation Prediction** | No intervention data during training. Directly performs counterfactual reasoning: gene knockout, overexpression, and pathway-level intervention — with native do-operator support. |
-| **Cross-Dataset Inference** | Train on one gene set, infer on another — no hardcoded `num_genes`. Dynamically adapts to any gene list at runtime. |
-| **Extreme Efficiency** | Bidirectional Mamba2 architecture. Memory ≤7GB. Training speed 7–8× faster than baseline. Supports simultaneous modeling of the full genome (>20,000 genes). |
-| **Full Platform Compatibility** | Pure PyTorch native — no CUDA, no custom operators. Seamless support for NVIDIA GPU, Apple Silicon MPS, and CPU with zero configuration changes. |
-| **High Interpretability** | Endogenously decouples chromatin accessibility amplitude Z and transcription switch S. Automatically identifies global regulatory factors. Regulatory network interpretability far exceeds black-box models. |
+Zero-shot counterfactual perturbation prediction from scRNA-seq alone — no multi-modal paired data, no ATAC-seq. Full-platform: NVIDIA GPU, Apple Silicon MPS, CPU.
 
 ---
 
 ## Quick Start
 
-### 1. Install Dependencies
+### 1. Install
 
 ```bash
 pip install torch einops pandas scanpy mygene
@@ -32,14 +19,14 @@ pip install torch einops pandas scanpy mygene
 python train.py
 
 # Custom dataset:
-python train.py --data_dir /path/to/your/dataset
+python train.py --data_dir path/to/dataset
 ```
 
-The `--data_dir` flag selects the dataset directory. Each dataset should provide:
+Each dataset directory needs:
 - `processed_data.pt` — expression tensor with `train`/`val` keys
 - `chrom_boundaries.pt` — chromosome block boundaries
 - `gene_embeddings.pt` — scGPT embeddings (optional, auto-detected)
-- `gene_meta.csv` — gene metadata with chromosome and genomic position (for cross-dataset support)
+- `gene_meta.csv` — gene metadata with chromosome and genomic position
 
 ### 3. Perturbation Prediction
 
@@ -49,186 +36,71 @@ python inference/inference.py
 
 ---
 
-## Complete Preprocessing Pipeline
+## Preprocessing Pipeline
 
-All commands run from the project root. No `cd` required.
+Default training data: PBS vehicle control from **Parse-10M** (629,701 PBMC cells x 40,352 genes, 12 donors, 18 cell types).
 
-The default training data is the PBS vehicle control condition from the **Parse-10M** dataset (629,701 PBMC cells × 40,352 genes, 12 human donors, 18 cell types).
+### Step 1: Raw scRNA-seq → Model-Ready Format
 
-### Step 1: Raw scRNA-seq Preprocessing
-
-Converts a raw `.h5ad` expression matrix into model-ready format.
-
-- Queries gene genomic coordinates automatically (via mygene)
-- Sorts genes by chromosome and position (required for Mamba sequence modeling)
-- Applies standard normalization: CPM/10000 + log1p
-- Splits into 80% training / 20% validation
+Gene coordinates queried via mygene. Genes sorted by chromosome + position. CPM/10000 + log1p normalization. 80/20 train/val split.
 
 ```bash
 python preprocess/preprocess_data.py --input your_data.h5ad --output_dir data/
 ```
 
-**Outputs under `data/`:**
-- `processed_data.pt` — train/val expression tensors `[num_cells, num_genes]` + gene names
-- `gene_meta.csv` — gene metadata with chromosome and genomic position
-
----
+Outputs in `data/`: `processed_data.pt`, `gene_meta.csv`.
 
 ### Step 2: scGPT Gene Embedding Matching
 
-Extracts and aligns pre-trained scGPT gene embeddings to your gene list. Supports three modes:
-
-| Mode | Flag | Behavior |
-|------|------|---------|
-| Zero-fill (default) | none | Unmatched genes filled with zeros |
-| Random fill | `--random-fill` | Unmatched genes initialized with small random vectors |
-| Drop unmatched (recommended) | `--drop-unmatched` | Automatically removes genes without embeddings; synchronously filters all data files for 100% alignment |
-
 ```bash
-# Recommended: drop unmatched genes (best performance)
+# Recommended: drop unmatched genes
 python preprocess/match_gene_embeddings.py \
   --scgpt_dir /path/to/scgpt-embedding/ \
   --drop-unmatched
 
-# Zero-fill unmatched genes
+# Zero-fill unmatched (default)
 python preprocess/match_gene_embeddings.py \
   --scgpt_dir /path/to/scgpt-embedding/
 
-# Random-fill unmatched genes
+# Random-fill unmatched
 python preprocess/match_gene_embeddings.py \
   --scgpt_dir /path/to/scgpt-embedding/ \
   --random-fill
 ```
 
-**Output under `data/`:**
-- `gene_embeddings.pt` — gene embeddings `[num_genes, scgpt_emb_dim]`, perfectly aligned with expression matrix gene order
+Output: `data/gene_embeddings.pt`.
 
----
-
-### Step 3: Chromosome Boundary Generation (run once per dataset)
-
-Generates the chromosome block boundary indices required for the cis-regulatory branch.
+### Step 3: Chromosome Boundaries (run once per dataset)
 
 ```bash
 python preprocess/generate_chrom_boundaries.py
 ```
 
-**Output under `data/`:**
-- `chrom_boundaries.pt` — list of `(start_idx, end_idx)` tuples, one per chromosome block
+Output: `data/chrom_boundaries.pt` — one `(start_idx, end_idx)` tuple per chromosome block.
 
----
+### Step 4: Fourier Position Encoder Pretraining (optional)
 
-### Optional Step 4: Fourier Position Encoder Pretraining
+Pretrain a genomic position encoder with contrastive learning, export as lookup table.
 
-Pretrain a genomic position encoder on gene coordinate data with contrastive learning, then export as a lookup table for GeneMamba. This provides position-aware gene representations that complement scGPT embeddings.
-
-**Data:** Gene pairs generated from `gene_meta.csv`. Positive pairs = genes within 50kb; negative pairs = genes over 2Mb apart. ~55k pairs across ~20k genes from the PBS dataset.
-
-**Config** (`pretrain_position/train.py`):
-- Fourier encoder: 16 frequencies, embed_dim=256, f0=1.0, sigma=2.0
+- 16 frequencies, embed_dim=256, f0=1.0, sigma=2.0
 - Contrastive: temperature=0.1, λ_dist=0.3, λ_uniform=0.1
-- Training: batch_size=512, num_epochs=50, lr=1e-3 (CosineAnnealing)
-
-**Expected result:** Validation gap (PosSim − NegSim) ≥ 0.80. Trained model achieves ~0.85.
+- Positive pairs: genes within 50kb. Negative pairs: genes over 2Mb apart
+- Target: validation gap (PosSim − NegSim) ≥ 0.80
 
 ```bash
 cd pretrain_position
-
-# Step 1: prepare gene pairs from gene_meta.csv
-python prepare_data.py
-
-# Step 2: pretrain with contrastive learning (~8 min on MPS)
-python train.py
-
-# Step 3: export lookup table
-python export_table.py
-# Output: ../position_table.pt (~26 MB, 20k genes × 256d)
+python prepare_data.py      # gene_meta.csv → gene pairs + coords
+python train.py             # contrastive pretraining (~8 min on MPS)
+python export_table.py      # → ../position_table.pt (~26 MB)
 ```
 
-See [`pretrain_position/README.md`](pretrain_position/README.md) for details.
-
----
-
-## Cross-Dataset Inference Architecture
-
-GeneMamba removes the hardcoded `num_genes` dependency from the original design. Two components were modified:
-
-### ① Dynamic Gene Embedding Lookup
-
-Instead of `nn.Embedding(num_genes, 512)` bound to a fixed gene count, embeddings are now looked up dynamically from gene names at runtime. The model accepts a `gene_names_list` parameter — different datasets can pass different gene lists, and the embedding matrix is indexed by name rather than by position.
-
-### ② Dynamic Regulator Gate (MLP)
-
-The original `nn.Parameter(torch.randn(num_genes))` for the regulator gate is replaced by a lightweight MLP that computes gate values from gene embeddings:
-
-```
-gate = sigmoid(Linear(gene_embedding)) ∈ (0, 1)
-```
-
-This is shape-invariant to gene count — the MLP always produces `[num_genes]` values regardless of how many genes are present.
-
-### Loading Old Checkpoints
-
-```python
-from models import load_with_migration
-model = load_with_migration(model, "path/to/old_checkpoint.pt")
-# Old regulator_gate is skipped (fresh MLP init); all other weights migrate automatically.
-```
-
----
-
-## Perturbation Evaluation Dataset (Schmidt)
-
-See [`Schmidt/`](Schmidt/) for the perturbation evaluation pipeline using the Schmidt perturb-seq dataset. Train on any dataset, evaluate perturbation prediction accuracy with 6 standardized metrics.
-
----
-
-## Project Structure
-
-```
-GeneMamba/
-├── train.py                 # Training entry (--data_dir flag)
-├── inference/inference.py  # Inference entry
-│
-├── models/                       # Model definitions
-│   └── model.py                  # GeneMamba (cis-trans dual branch)
-│                                  # + RegulatorGate MLP (cross-dataset gate)
-│                                  # + PositionEncoder (pretrained table or Fourier fallback)
-│
-├── train/                         # Training logic
-│   └── run_training.py      # End-to-end training script (gene_names aware)
-│
-├── preprocess/                    # Data preprocessing
-│   ├── preprocess_data.py         # h5ad → model-ready tensors
-│   ├── match_gene_embeddings.py    # scGPT embedding matching
-│   └── generate_chrom_boundaries.py # Chromosome block boundaries
-│
-├── pretrain_position/             # Fourier position encoder pretraining
-│   ├── prepare_data.py            # gene_meta.csv → gene pairs
-│   ├── fourier_encoder.py         # Fourier position encoder
-│   ├── train.py                   # Contrastive learning training
-│   └── export_table.py            # Export position_table.pt
-│
-├── utils/                         # Shared utilities
-│   ├── utils.py                   # Config, metrics, checkpoint I/O
-│   └── losses.py                  # Loss functions (NB, sparsity, etc.)
-│
-├── tests/                         # Debugging / profiling scripts
-├── checkpoints/                    # Auto-saved model weights
-├── position_table.pt              # Pretrained Fourier position lookup table
-├── data/                          # Preprocessed data (auto-created)
-│   ├── processed_data.pt          # Train/val expression tensors
-│   ├── gene_meta.csv             # Gene metadata
-│   ├── gene_embeddings.pt        # scGPT embeddings
-│   └── chrom_boundaries.pt       # Chromosome block indices
-└── Schmidt/                      # Perturbation evaluation dataset
-```
+The main training script auto-detects `position_table.pt` at the project root and loads it. Falls back to on-the-fly Fourier encoding if not found.
 
 ---
 
 ## Architecture
 
-Cis-trans dual branch: chromosome-block shared bidirectional Mamba2 + zero-prior global regulatory gating + Fourier position encoder.
+Cis-trans dual branch: chromosome-blocked bidirectional Mamba2 + zero-prior global regulatory gating + Fourier position encoder.
 
 ```
                     ┌─────────────────────────────────────┐
@@ -275,78 +147,139 @@ Cis-trans dual branch: chromosome-block shared bidirectional Mamba2 + zero-prior
                     └─────────────────────────────────────┘
 ```
 
-- Training memory: **≤7 GB**
-- Training speed: **7–8× faster** than baseline
-- TF target gene recall: **≥80%**
-- Cross-chromosome false positives: **>50% reduction**
-- Cross-dataset parameters: `RegulatorGate` MLP ≈ **33k** parameters (<0.2% of total)
-- Position encoder: **256d Fourier** (16 frequencies), pretrained with contrastive learning (Gap ≥ 0.80)
-
 ---
 
-## Hyperparameter Configuration
+## Hyperparameters
 
-All hyperparameters are centralized in `utils/utils.py` — edit there, no need to touch model code.
+All in `utils/utils.py`.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `hidden_dim` | 256 | Mamba / linear layer hidden dimension |
-| `num_mamba_layers` | 2 | Number of bidirectional Mamba layers |
-| `latent_dim` | 64 | VAE latent space dimension |
-| `learning_rate` | 1e-4 | Optimizer learning rate |
+| `hidden_dim` | 256 | Mamba / projection hidden dimension |
+| `num_mamba_layers` | 2 | Bidirectional Mamba layers per direction |
+| `latent_dim` | 64 | VAE latent dimension |
+| `learning_rate` | 1e-4 | AdamW learning rate |
+| `weight_decay` | 1e-5 | AdamW weight decay |
+| `grad_clip_value` | 1.0 | Gradient clipping |
 | `batch_size` | 16 | Training batch size |
-| `max_regulators` | 512 | Active regulators in trans branch (model init) |
+| `num_epochs` | 100 | Training epochs |
+| `max_train_cells` | 100000 | Cap on training cells (0 = all) |
+| `nb_loss_weight` | 1.0 | Negative binomial loss weight |
+| `sparsity_loss_weight` | 0.5 | Latent sparsity weight |
+
+Model constructor defaults: `max_regulators=512`, `chunk_size=64`, `d_state=16`, `d_conv=4`, `expand=2`, `dropout=0.1`.
 
 ---
 
-## Documentation
+## Cross-Dataset Inference
 
-- [Fourier Position Encoder Pretraining](pretrain_position/README.md)
+Gene count is not hardcoded. Two components make the model shape-invariant:
+
+1. **Dynamic embedding lookup** — gene embeddings indexed by name, not position. Pass `gene_names_list` at forward time.
+2. **RegulatorGate MLP** — a lightweight MLP over gene embeddings replaces the old fixed-size parameter. Always outputs `[num_genes]` regardless of gene count (~33k params, <0.2% of total).
+
+Loading old checkpoints:
+```python
+from models import load_with_migration
+model = load_with_migration(model, "old_checkpoint.pt")
+# Old regulator_gate is skipped; all other weights migrate if shapes match.
+```
 
 ---
 
-## Frequently Asked Questions
+## Perturbation Evaluation (Schmidt)
 
-### Training runs out of memory (OOM)
+See `Schmidt/` for the perturbation evaluation pipeline using the Schmidt perturb-seq dataset.
 
-GeneMamba is designed for ≤7 GB with default settings. If you hit OOM:
+```bash
+cd Schmidt
+python preprocess.py --scgpt_dir /path/to/scgpt-embedding
+python evaluate.py --checkpoint ../checkpoints/genemamba_checkpoint.pt
+```
 
-1. Reduce `batch_size` in `utils/utils.py` (default 16 → try 8 or 4)
-2. Reduce `max_regulators` at model initialization (default 512 → try 256 or 128)
-3. On Apple Silicon, enable MPS fallback: `PYTORCH_ENABLE_MPS_FALLBACK=1 python train.py`
+Six standardized metrics: MSE, E-distance, PCC-delta, Wasserstein, KL-divergence, Common-DEGs.
 
-### Gene count mismatch between data and embeddings
+---
 
-Run with `--drop-unmatched` — this synchronously filters all data files so only genes with valid scGPT embeddings remain:
+## Project Structure
 
+```
+GeneMamba/
+├── train.py                        # Entry point (--data_dir flag)
+├── inference/inference.py          # do-operator inference
+│
+├── models/model.py                 # GeneMamba, Mamba2, RegulatorGate,
+│                                   #   PositionEncoder, load_with_migration
+├── train/run_training.py           # Training loop
+│
+├── utils/
+│   ├── utils.py                    # Config, metrics, checkpoint I/O
+│   └── losses.py                   # NB loss, sparsity, decoupling, smoothness
+│
+├── preprocess/
+│   ├── preprocess_data.py           # h5ad → processed tensors
+│   ├── match_gene_embeddings.py     # scGPT embedding matching
+│   └── generate_chrom_boundaries.py # Chromosome block boundaries
+│
+├── pretrain_position/
+│   ├── prepare_data.py              # gene_meta.csv → gene pairs + coords
+│   ├── fourier_encoder.py           # Fourier position encoder
+│   ├── train.py                     # Contrastive learning
+│   └── export_table.py              # Export position_table.pt
+│
+├── Schmidt/
+│   ├── preprocess.py                # Schmidt dataset prep
+│   └── evaluate.py                  # 6-metric evaluation
+│
+├── tests/debug_memory.py            # Memory profiling
+├── checkpoints/                     # Saved model weights
+├── data/                            # Preprocessed data
+│   ├── processed_data.pt
+│   ├── gene_meta.csv
+│   ├── gene_embeddings.pt
+│   └── chrom_boundaries.pt
+└── position_table.pt                # Pretrained Fourier lookup table
+```
+
+---
+
+## FAQ
+
+### Out of memory
+
+Reduce `batch_size` in `utils/utils.py` (16 → 8 or 4). On Apple Silicon: `PYTORCH_ENABLE_MPS_FALLBACK=1 python train.py`.
+
+### Gene count mismatch
+
+Run with `--drop-unmatched`:
 ```bash
 python preprocess/match_gene_embeddings.py --scgpt_dir /path/to/scgpt --drop-unmatched
 ```
+This synchronously filters all data files so only genes with valid scGPT embeddings remain.
 
-### Can I run without a GPU?
+### No GPU
 
-Yes. GeneMamba falls back automatically: MPS (Apple Silicon) → CUDA → CPU. No code changes needed.
+Falls back automatically: MPS (Apple Silicon) → CUDA → CPU. No code changes.
 
-### Can I train on one dataset and infer on another with different genes?
+### Cross-dataset inference (different gene sets)
 
-Yes. Pass `gene_names_list` to the model forward call. The `RegulatorGate` MLP and dynamic embedding lookup are shape-invariant to gene count. See "Cross-Dataset Inference Architecture" above.
+Pass `gene_names_list` to the model forward call. The RegulatorGate MLP and dynamic embedding lookup are shape-invariant.
 
-### What if chromosome boundaries fail to load?
+### Chromosome boundaries fail to load
 
-The model falls back to whole-genome single-block mode (slower, higher memory). Run `python preprocess/generate_chrom_boundaries.py` to generate the boundary file after preprocessing.
+Model falls back to whole-genome single-block mode. Run `python preprocess/generate_chrom_boundaries.py` to generate boundaries.
 
-### How do I use the pretrained Fourier position encoder?
+### Using the pretrained position encoder
 
 ```bash
-python pretrain_position/prepare_data.py   # generates gene pairs
-python pretrain_position/train.py            # trains the encoder
-python pretrain_position/export_table.py     # exports position_table.pt
+python pretrain_position/prepare_data.py
+python pretrain_position/train.py
+python pretrain_position/export_table.py
 ```
-
-Then in your training script, pass `position_table_path="position_table.pt"` to `GeneMamba`. See `pretrain_position/README.md` for details.
+The training script auto-detects `position_table.pt`. No extra flags needed.
 
 ---
 
 ## License
 
-MIT License
+MIT

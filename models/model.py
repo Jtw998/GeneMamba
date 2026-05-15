@@ -13,6 +13,7 @@ import os
 from typing import Tuple, List, Optional
 from torch.utils.checkpoint import checkpoint
 
+
 def silu(x):
     """Applies the Sigmoid Linear Unit (SiLU), element-wise."""
     return x * torch.sigmoid(x)
@@ -178,7 +179,6 @@ def reparameterize(mean, log_var):
     std = torch.exp(0.5 * log_var)
     return mean + torch.randn_like(std) * std
 
-# Gradient checkpoint wrapper: do not save Mamba intermediate activations, recompute during backward pass
 def run_mamba_layers(layers, x):
     for layer in layers:
         x, _ = checkpoint(layer, x, use_reentrant=False)
@@ -264,7 +264,11 @@ class PositionEncoder(nn.Module):
                 else torch.tensor(raw_table[g])
                 for g in gene_names
             ])
+            # Append a zero row for unknown genes (index = len(gene_names))
+            unk_row = torch.zeros(1, self.pos_embed_dim)
+            matrix = torch.cat([matrix, unk_row], dim=0)
             self.pos_embedding = nn.Embedding.from_pretrained(matrix, freeze=True)
+            self.unk_idx = len(gene_names)
             self.pos_proj = nn.Linear(self.pos_embed_dim, hidden_dim, bias=False)
             print(f"PositionEncoder: loaded pretrained table ({len(gene_names)} genes, dim={self.pos_embed_dim})")
         else:
@@ -307,7 +311,7 @@ class PositionEncoder(nn.Module):
         """
         if self.pos_embedding is not None and gene_names_list is not None:
             indices = torch.tensor(
-                [self.pos_gene_to_idx.get(g, 0) for g in gene_names_list],
+                [self.pos_gene_to_idx.get(g, self.unk_idx) for g in gene_names_list],
                 device=gene_embed.device,
             )
             pos_emb = self.pos_proj(self.pos_embedding(indices))
@@ -539,12 +543,7 @@ class GeneMamba(nn.Module):
             # Write directly to pre-allocated tensor
             cis_out[:, start:end, :] = fused
 
-            # Explicitly release intermediate variables
             del block, block_fwd, block_bwd, combined, fused
-
-            # Regularly clean MPS cache
-            if (idx + 1) % 10 == 0 and torch.backends.mps.is_available():
-                torch.mps.empty_cache()
 
         # --------------------------
         # Trans branch: zero-prior global regulatory effect learning
@@ -621,7 +620,7 @@ class GeneMamba(nn.Module):
         Requires gene_names_list to look up cached embeddings.
         Must be called after at least one forward pass (populates the cache).
         """
-        cache_key = id(tuple(gene_names_list))
+        cache_key = hash(tuple(gene_names_list))
         cached_emb = None
         if hasattr(self, '_cached_gene_emb') and self._cached_gene_emb:
             cached_emb = self._cached_gene_emb.get(cache_key)

@@ -121,7 +121,7 @@ def main():
         gene_emb_dim=gene_emb_dim,
         gene_emb=gene_emb,
         freeze_gene_emb=(gene_emb is not None),
-        chrom_boundaries=torch.load(os.path.join(args.data_dir, "schmidt_chrom_boundaries.pt")),
+        chrom_boundaries_path=os.path.join(args.data_dir, "schmidt_chrom_boundaries.pt"),
         hidden_dim=256,
         num_mamba_layers=2,
     )

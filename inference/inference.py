@@ -103,6 +103,7 @@ if __name__ == "__main__":
     # Load example cell data (take first validation cell)
     data = torch.load("data/processed_data.pt")
     val_data = data["val"]
+    gene_names = data.get("gene_names", None)
     sample = val_data[0:1, :]
     # Example: knockout MYC gene (assume MYC index is 1234, replace with actual index)
     myc_idx = 1234
@@ -110,5 +111,5 @@ if __name__ == "__main__":
     print(f"Top 10 upregulated genes after MYC knockout: {res['top_upregulated_genes']}")
     print(f"Top 10 downregulated genes after MYC knockout: {res['top_downregulated_genes']}")
     # Print identified regulatory factors
-    regulators = model.get_regulator_genes()
+    regulators = model.get_regulator_genes(gene_names)
     print(f"\nTotal {len(regulators)} regulatory factors identified by model, indices: {regulators.tolist()}")

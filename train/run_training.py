@@ -23,12 +23,12 @@ def create_dataloaders(train_data, val_data, gene_names=None):
         train_loader = DataLoader(
             TensorDataset(train_data),
             batch_size=config["batch_size"], shuffle=True,
-            collate_fn=lambda batch: (batch[0][0], gene_names),
+            collate_fn=lambda batch: (torch.stack([s[0] for s in batch]), gene_names),
         )
         val_loader = DataLoader(
             TensorDataset(val_data),
             batch_size=config["batch_size"], shuffle=False,
-            collate_fn=lambda batch: (batch[0][0], gene_names),
+            collate_fn=lambda batch: (torch.stack([s[0] for s in batch]), gene_names),
         )
     else:
         train_loader = DataLoader(TensorDataset(train_data), batch_size=config["batch_size"], shuffle=True)
@@ -41,7 +41,6 @@ def train_epoch(model, dataloader, optimizer, device):
     total_loss = 0.0
     all_predictions, all_targets = [], []
     loss_components = {}
-    batch_idx = 0
 
     for batch in tqdm(dataloader, desc="Training"):
         expression = batch[0].to(device)
@@ -49,7 +48,6 @@ def train_epoch(model, dataloader, optimizer, device):
         optimizer.zero_grad()
         predictions, latent_mean, latent_log_var, latent_sample = model(expression, gene_names_list=gene_names_list)
         loss, components = compute_total_loss(predictions, expression, latent_mean, latent_sample)
-        # Sparsity loss: only when scGPT gene embeddings are available (enables gate computation)
         if model.gene_embedding is not None and gene_names_list is not None:
             cached_gene_emb = model.get_cached_gene_emb(gene_names_list)
             gate_vals = model.regulator_gate.current_gate_vals(cached_gene_emb)
@@ -61,10 +59,6 @@ def train_epoch(model, dataloader, optimizer, device):
         torch.nn.utils.clip_grad_norm_(model.parameters(), config["grad_clip_value"])
         optimizer.step()
         model.regulator_gate.clear_cache()
-
-        batch_idx += 1
-        if batch_idx % 5 == 0 and torch.backends.mps.is_available():
-            torch.mps.empty_cache()
 
         total_loss += loss.item()
         all_predictions.append(predictions.detach().cpu())
@@ -197,6 +191,11 @@ if __name__ == "__main__":
     print(f"Training set: {train_data.shape[0]} cells x {train_data.shape[1]} genes")
     print(f"Validation set: {val_data.shape[0]} cells x {val_data.shape[1]} genes")
 
+    pos_table_path = "../position_table.pt"
+    if not os.path.exists(pos_table_path):
+        pos_table_path = None
+        print("Position table not found, using fallback Fourier encoder")
+
     model = GeneMamba(
         num_genes=train_data.shape[1],
         gene_emb_dim=gene_emb.shape[1] if gene_emb is not None else 512,
@@ -204,6 +203,7 @@ if __name__ == "__main__":
         gene_names=gene_names,
         freeze_gene_emb=(gene_emb is not None),
         chrom_boundaries_path=chrom_file,
+        position_table_path=pos_table_path,
         hidden_dim=config["hidden_dim"],
         num_mamba_layers=config["num_mamba_layers"]
     )
