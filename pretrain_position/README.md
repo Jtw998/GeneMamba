@@ -1,8 +1,8 @@
 # Fourier Position Encoder Pretraining
 
-Pretrain a genomic position encoder on gene coordinate data, then export as a lookup table for injection into GeneMamba.
+Pretrain a genomic position encoder on gene coordinate data, then export as a lookup table for injection into Hayat.
 
-**Why:** Gene coordinates encode cis-regulatory proximity. Adjacent genes share TADs, co-regulate, and belong to the same chromatin domain. Pre-training a Fourier encoder to capture this structure improves GeneMamba's ability to reason about genomic context — especially useful when scGPT embeddings are unavailable (e.g., new species).
+**Why:** Gene coordinates encode cis-regulatory proximity. Adjacent genes share TADs, co-regulate, and belong to the same chromatin domain. Pre-training a Fourier encoder to capture this structure improves Hayat's ability to reason about genomic context — especially useful when scGPT embeddings are unavailable (e.g., new species).
 
 **How it works:**
 
@@ -42,7 +42,7 @@ python pretrain_position/export_table.py
 | `gene_to_idx.json` | gene_name → integer index |
 | `pairs.json` | 147k gene pairs with labels and genomic distances |
 | `checkpoints/best_model.pt` | Trained encoder weights |
-| `../position_table.pt` | Final lookup table for GeneMamba |
+| `../position_table.pt` | Final lookup table for Hayat |
 
 ---
 
@@ -74,12 +74,12 @@ Best model is saved when Gap is maximized.
 
 ---
 
-## Loading into GeneMamba
+## Loading into Hayat
 
 ```python
-from models import GeneMamba
+from models import Hayat
 
-model = GeneMamba(
+model = Hayat(
     num_genes=...,
     gene_emb_dim=...,
     gene_emb=...,
@@ -88,7 +88,7 @@ model = GeneMamba(
 )
 ```
 
-GeneMamba's `PositionEncoder` has two modes:
+Hayat's `PositionEncoder` has two modes:
 - **Mode A** (recommended): loads `position_table.pt`, does O(1) lookup per gene
 - **Mode B** (fallback): computes Fourier features on-the-fly from gene coordinates — no pretraining needed
 

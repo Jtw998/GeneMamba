@@ -2,7 +2,7 @@
 Export pretrained Fourier encoder as a lookup table.
 
 Loads best_model.pt, computes position embeddings for all genes,
-and saves position_table.pt for use in GeneMamba PositionEncoder.
+and saves position_table.pt for use in Hayat PositionEncoder.
 
 Output: position_table.pt
   {

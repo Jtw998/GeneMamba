@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Debug memory usage of GeneMamba model, printing memory at each stage.
+Debug memory usage of Hayat model, printing memory at each stage.
 """
 import torch
 import sys
-from models import GeneMamba
+from models import Hayat
 
 def print_memory(stage: str):
     """Print current GPU memory usage."""
@@ -31,7 +31,7 @@ def main():
 
     # 1. Model init
     print_memory("before_model_init")
-    model = GeneMamba(num_genes=num_genes)
+    model = Hayat(num_genes=num_genes)
     model = model.to(device)
     print(f"max_regulators: {model.max_regulators}")
     print_memory("after_model_init")

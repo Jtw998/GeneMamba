@@ -15,7 +15,7 @@ config: Dict = {
     "learning_rate": 1e-4,
     "weight_decay": 1e-5,
     "grad_clip_value": 1.0,
-    "num_epochs": 100,
+    "num_epochs": 3,
     "batch_size": 16,
     "validation_split": 0.2,
 
@@ -30,7 +30,7 @@ config: Dict = {
     "knockout_value": 0.0,      # knockout value
 
     # Demo parameters
-    "max_train_cells": 100000,   # limit training cells, 0 = use all
+    "max_train_cells": 2000,      # 0 = use all (100k subset via processed_data_100k.pt)
 }
 
 def normalize_expression(expression: torch.Tensor) -> torch.Tensor:

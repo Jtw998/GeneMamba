@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-GeneMamba training script.
+Hayat training script.
 Supports any dataset directory via GENE_DATA_DIR environment variable (set by train.py).
 """
 import os
@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 from typing import Dict, Tuple
 
-from models import GeneMamba
+from models import Hayat
 from utils import compute_total_loss
 from utils import config, calculate_metrics, save_checkpoint, load_checkpoint
 
@@ -46,7 +46,8 @@ def train_epoch(model, dataloader, optimizer, device):
         expression = batch[0].to(device)
         gene_names_list = batch[1] if len(batch) > 1 else None
         optimizer.zero_grad()
-        predictions, latent_mean, latent_log_var, latent_sample = model(expression, gene_names_list=gene_names_list)
+        with torch.autocast("mps", dtype=torch.bfloat16):
+            predictions, latent_mean, latent_log_var, latent_sample = model(expression, gene_names_list=gene_names_list)
         loss, components = compute_total_loss(predictions, expression, latent_mean, latent_sample)
         if model.gene_embedding is not None and gene_names_list is not None:
             cached_gene_emb = model.get_cached_gene_emb(gene_names_list)
@@ -82,7 +83,7 @@ def val_epoch(model, dataloader, device):
     total_loss = 0.0
     all_predictions, all_targets = [], []
     loss_components = {}
-    with torch.no_grad():
+    with torch.no_grad(), torch.autocast("mps"):
         for batch in tqdm(dataloader, desc="Validation"):
             expression = batch[0].to(device)
             gene_names_list = batch[1] if len(batch) > 1 else None
@@ -135,7 +136,12 @@ if __name__ == "__main__":
         emb_file = f"../{data_dir}/schmidt_gene_embeddings.pt"
         chrom_file = f"../{data_dir}/schmidt_chrom_boundaries.pt"
     else:
-        data_file = f"{data_dir}/processed_data.pt"
+        # Use 100k subset if available (smaller memory footprint)
+        data_file_100k = f"{data_dir}/processed_data_100k.pt"
+        if os.path.exists(data_file_100k):
+            data_file = data_file_100k
+        else:
+            data_file = f"{data_dir}/processed_data.pt"
         emb_file = f"{data_dir}/gene_embeddings.pt"
         chrom_file = f"{data_dir}/chrom_boundaries.pt"
 
@@ -176,9 +182,14 @@ if __name__ == "__main__":
         train_data = data["train"]
         val_data = data["val"]
         max_cells = config.get("max_train_cells", 0)
-        if max_cells > 0 and train_data.shape[0] > max_cells:
-            train_data = train_data[:max_cells]
-            print(f"[Demo mode] Subsampled training set to {train_data.shape[0]} cells")
+        if max_cells > 0:
+            if train_data.shape[0] > max_cells:
+                train_data = train_data[:max_cells]
+                print(f"[Demo mode] Subsampled training set to {train_data.shape[0]} cells")
+            val_max = max(max_cells // 5, 200)  # val ~20% of train, min 200
+            if val_data.shape[0] > val_max:
+                val_data = val_data[:val_max]
+                print(f"[Demo mode] Subsampled validation set to {val_data.shape[0]} cells")
 
     if os.path.exists(emb_file):
         gene_emb = torch.load(emb_file)
@@ -196,7 +207,7 @@ if __name__ == "__main__":
         pos_table_path = None
         print("Position table not found, using fallback Fourier encoder")
 
-    model = GeneMamba(
+    model = Hayat(
         num_genes=train_data.shape[1],
         gene_emb_dim=gene_emb.shape[1] if gene_emb is not None else 512,
         gene_emb=gene_emb,
@@ -218,7 +229,7 @@ if __name__ == "__main__":
     print(f"Frozen parameters: {frozen_params:,}")
     print(f"Model size: {total_params * 4 / 1024 / 1024:.2f} MB")
 
-    ckpt_name = f"genemamba_{data_dir.replace('/', '_')}.pt"
+    ckpt_name = f"hayat_{data_dir.replace('/', '_')}.pt"
     ckpt_path = f"../checkpoints/{ckpt_name}"
     print(f"Checkpoint: {ckpt_path}")
     train_model(model, train_data, val_data, gene_names, config, device=device, checkpoint_path=ckpt_path)

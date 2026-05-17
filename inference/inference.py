@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-GeneMamba standalone do-operator inference script
+Hayat standalone do-operator inference script
 Supports single-gene/multi-gene/pathway-level zero-shot perturbation prediction, automatically considers cis + trans effects
 """
 import torch
 from typing import List, Dict
-from models import GeneMamba
+from models import Hayat
 def predict_perturbation(
-    model: GeneMamba,
+    model: Hayat,
     baseline_expression: torch.Tensor,
     perturb_gene_indices: List[int],
     perturb_type: str = "knockout",
@@ -17,7 +17,7 @@ def predict_perturbation(
     """
     Predict genome-wide expression changes after gene perturbation, supports cis + trans effect propagation
     Args:
-        model: GeneMamba model
+        model: Hayat model
         baseline_expression: [1, num_genes] Baseline expression profile of a single sample
         perturb_gene_indices: List of gene indices to perturb
         perturb_type: Perturbation type: "knockout" (set to 0), "overexpression", "custom" (custom value)
@@ -73,7 +73,7 @@ def predict_perturbation(
         "perturb_type": perturb_type
     }
 def batch_perturbation_analysis(
-    model: GeneMamba,
+    model: Hayat,
     baseline_expression: torch.Tensor,
     gene_indices: List[int],
     perturb_type: str = "knockout",
@@ -91,14 +91,14 @@ if __name__ == "__main__":
     print(f"Using device: {device}")
     # Load trained model
     gene_emb = torch.load("data/gene_embeddings.pt")
-    model = GeneMamba(
+    model = Hayat(
         num_genes=21900,
         gene_emb_dim=gene_emb.shape[1],
         gene_emb=gene_emb,
         freeze_gene_emb=True
     )
     from utils import load_checkpoint
-    load_checkpoint(model, "genemamba_checkpoint.pt", device)
+    load_checkpoint(model, "hayat_checkpoint.pt", device)
     model = model.to(device)
     # Load example cell data (take first validation cell)
     data = torch.load("data/processed_data.pt")

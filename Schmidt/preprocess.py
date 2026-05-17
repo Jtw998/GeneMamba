@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Schmidt perturbation dataset preprocessing script.
-Converts filter_hvg5000_logNor.h5ad into GeneMamba format.
+Converts filter_hvg5000_logNor.h5ad into Hayat format.
 Only single-gene perturbations are kept. Uses existing logNor layer directly.
 Queries real chromosomal coordinates via mygene.
 """

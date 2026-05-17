@@ -1,4 +1,4 @@
-# GeneMamba: Causal State Space Model for Single-Cell Transcriptomics
+# Hayat: Causal State Space Model for Single-Cell Transcriptomics
 
 Zero-shot counterfactual perturbation prediction from scRNA-seq alone — no multi-modal paired data, no ATAC-seq. Full-platform: NVIDIA GPU, Apple Silicon MPS, CPU.
 
@@ -194,7 +194,7 @@ See `Schmidt/` for the perturbation evaluation pipeline using the Schmidt pertur
 ```bash
 cd Schmidt
 python preprocess.py --scgpt_dir /path/to/scgpt-embedding
-python evaluate.py --checkpoint ../checkpoints/genemamba_checkpoint.pt
+python evaluate.py --checkpoint ../checkpoints/hayat_checkpoint.pt
 ```
 
 Six standardized metrics: MSE, E-distance, PCC-delta, Wasserstein, KL-divergence, Common-DEGs.
@@ -204,11 +204,11 @@ Six standardized metrics: MSE, E-distance, PCC-delta, Wasserstein, KL-divergence
 ## Project Structure
 
 ```
-GeneMamba/
+Hayat/
 ├── train.py                        # Entry point (--data_dir flag)
 ├── inference/inference.py          # do-operator inference
 │
-├── models/model.py                 # GeneMamba, Mamba2, RegulatorGate,
+├── models/model.py                 # Hayat, Mamba2, RegulatorGate,
 │                                   #   PositionEncoder, load_with_migration
 ├── train/run_training.py           # Training loop
 │

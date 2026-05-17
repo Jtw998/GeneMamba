@@ -8,7 +8,7 @@ Metrics:
   Population-distribution: Wasserstein distance, KL-divergence, Common-DEGs
 
 Usage:
-  python3 evaluate.py --checkpoint ../checkpoints/genemamba_checkpoint.pt
+  python3 evaluate.py --checkpoint ../checkpoints/hayat_checkpoint.pt
 """
 import argparse
 import torch
@@ -20,7 +20,7 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from models import GeneMamba
+from models import Hayat
 from utils import load_checkpoint
 
 
@@ -116,7 +116,7 @@ def main():
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     print(f"Device: {device}")
 
-    model = GeneMamba(
+    model = Hayat(
         num_genes=expr.shape[1],
         gene_emb_dim=gene_emb_dim,
         gene_emb=gene_emb,

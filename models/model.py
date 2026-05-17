@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-GeneMamba: Chromosome-blocked shared Mamba + zero-prior cis-trans dual-branch architecture
+Hayat: Chromosome-blocked shared Mamba + zero-prior cis-trans dual-branch architecture
 Memory ≤7GB, training speed 7-8x faster, TF target gene recall ≥80%
 """
 import torch
@@ -40,8 +40,12 @@ def segsum(x: Tensor, device=None) -> Tensor:
     x_segsum = x_segsum.masked_fill(~mask, -torch.inf)
     return x_segsum
 
-def ssd(x, A, B, C, chunk_size, initial_states=None, device=None):
-    """Structed State Space Duality (SSD) - the core of Mamba-2"""
+def ssd(x, A, B, C, chunk_size, initial_states=None, device=None, segment_ids=None):
+    """Structed State Space Duality (SSD) - the core of Mamba-2
+
+    segment_ids: [num_chunks] long tensor — chunks with different IDs have their
+                 inter-chunk state propagation zeroed (boundary reset).
+    """
     # Ensure sequence length is divisible by chunk_size (already padded externally)
     assert x.shape[1] % chunk_size == 0
 
@@ -66,6 +70,16 @@ def ssd(x, A, B, C, chunk_size, initial_states=None, device=None):
         initial_states = torch.zeros_like(states[:, :1])
     states = torch.cat([initial_states, states], dim=1)
     decay_chunk = torch.exp(segsum(F.pad(A_cumsum[:, :, :, -1], (1, 0)), device=device))
+
+    # Segmented scan: zero out state propagation across segment boundaries
+    if segment_ids is not None:
+        n_chunks = segment_ids.shape[0]
+        seg_eq = (segment_ids.unsqueeze(0) == segment_ids.unsqueeze(1))  # [C, C]
+        seg_eq_pad = F.pad(seg_eq.float(), (1, 0, 1, 0), value=1.0)  # [C+1, C+1]
+        tril = torch.tril(torch.ones(n_chunks + 1, n_chunks + 1, device=device))
+        seg_mask = (seg_eq_pad * tril).to(dtype=decay_chunk.dtype)
+        decay_chunk = decay_chunk * seg_mask  # broadcast [B,H] over [C+1,C+1]
+
     new_states = torch.einsum("bhzc, bchpn -> bzhpn", decay_chunk, states)
     states, final_state = new_states[:, :-1], new_states[:, -1]
 
@@ -116,11 +130,13 @@ class Mamba2(nn.Module):
         nn.init.constant_(self.A_log, -math.log(2))
         nn.init.ones_(self.D)
 
-    def forward(self, u: Tensor, h=None):
+    def forward(self, u: Tensor, h=None, segment_ids=None):
         """
         Arguments
             u: (batch, seqlen, d_model) input.
             h: hidden states for inference step, not used in training.
+            segment_ids: [seqlen] long tensor — gene-level segment IDs.
+                         Chunks spanning different segments get state reset in ssd().
         Return (y, None) - compatible with GRU return format.
         """
         device = u.device
@@ -130,6 +146,8 @@ class Mamba2(nn.Module):
         pad_len = (self.chunk_size - seqlen % self.chunk_size) % self.chunk_size
         if pad_len > 0:
             u = F.pad(u, (0, 0, 0, pad_len))
+            if segment_ids is not None:
+                segment_ids = F.pad(segment_ids, (0, pad_len), value=segment_ids[-1].item())
 
         A = -torch.exp(self.A_log)  # (nheads,)
 
@@ -154,6 +172,12 @@ class Mamba2(nn.Module):
         )
         x = rearrange(x, "b l (h p) -> b l h p", p=self.headdim)
 
+        # Convert gene-level segment_ids to chunk-level
+        chunk_seg_ids = None
+        if segment_ids is not None:
+            n_chunks = segment_ids.shape[0] // self.chunk_size
+            chunk_seg_ids = segment_ids[:n_chunks * self.chunk_size].view(n_chunks, self.chunk_size)[:, 0]
+
         # Call ssd with standard parameter processing
         y, _ = ssd(
             x * dt.unsqueeze(-1),
@@ -162,6 +186,7 @@ class Mamba2(nn.Module):
             rearrange(C, "b l n -> b l 1 n"),
             self.chunk_size,
             device=device,
+            segment_ids=chunk_seg_ids,
         )
         y = y + x * self.D.unsqueeze(-1)
         y = rearrange(y, "b l h p -> b l (h p)")
@@ -179,9 +204,12 @@ def reparameterize(mean, log_var):
     std = torch.exp(0.5 * log_var)
     return mean + torch.randn_like(std) * std
 
-def run_mamba_layers(layers, x):
+def run_mamba_layers(layers, x, segment_ids=None):
     for layer in layers:
-        x, _ = checkpoint(layer, x, use_reentrant=False)
+        if segment_ids is not None:
+            x, _ = checkpoint(lambda u, seg: layer(u, segment_ids=seg), x, segment_ids, use_reentrant=False)
+        else:
+            x, _ = checkpoint(layer, x, use_reentrant=False)
     return x
 
 # --------------------------
@@ -333,7 +361,7 @@ class PositionEncoder(nn.Module):
 # --------------------------
 # Main model class
 # --------------------------
-class GeneMamba(nn.Module):
+class Hayat(nn.Module):
     def __init__(
         self,
         num_genes: int,
@@ -521,29 +549,26 @@ class GeneMamba(nn.Module):
         x = self.position_encoder(x, gene_names_list=gene_names_list, gene_coords=gene_coords)
 
         # --------------------------
-        # Cis branch: chromosome-blocked shared Mamba processing (memory optimized version: pre-allocate output, immediate release)
+        # Cis branch: segmented scan — single long sequence with state resets
+        # at chromosome boundaries (replaces 326 independent short scans to
+        # eliminate kernel-launch overhead on MPS).
         # --------------------------
-        cis_out = torch.empty(batch_size, num_genes, self.hidden_dim, device=x.device, dtype=x.dtype)
+        segment_ids = torch.zeros(num_genes, dtype=torch.long, device=x.device)
+        for i, (start, end) in enumerate(self.chrom_boundaries):
+            segment_ids[start:end] = i
 
-        for idx, (start, end) in enumerate(self.chrom_boundaries):
-            block = x[:, start:end, :]  # [B, L_block, D]
+        # Forward Mamba: one pass with segment boundary resets
+        cis_fwd = run_mamba_layers(self.forward_layers, x, segment_ids=segment_ids)
 
-            # Forward Mamba (gradient checkpoint optimized)
-            block_fwd = run_mamba_layers(self.forward_layers, block)
+        # Backward Mamba: reverse both sequence and segment IDs
+        x_rev = torch.flip(x, dims=[1])
+        seg_rev = torch.flip(segment_ids, dims=[0])
+        cis_bwd_rev = run_mamba_layers(self.backward_layers, x_rev, segment_ids=seg_rev)
+        cis_bwd = torch.flip(cis_bwd_rev, dims=[1])
 
-            # Backward Mamba (gradient checkpoint optimized)
-            block_bwd = torch.flip(block, dims=[1])
-            block_bwd = run_mamba_layers(self.backward_layers, block_bwd)
-            block_bwd = torch.flip(block_bwd, dims=[1])
-
-            # Local semantic fusion
-            combined = torch.cat([block_fwd, block_bwd], dim=-1)
-            fused = self.semantic_fusion(combined)  # [B, L_block, D]
-
-            # Write directly to pre-allocated tensor
-            cis_out[:, start:end, :] = fused
-
-            del block, block_fwd, block_bwd, combined, fused
+        # Semantic fusion
+        combined = torch.cat([cis_fwd, cis_bwd], dim=-1)
+        cis_out = self.semantic_fusion(combined)
 
         # --------------------------
         # Trans branch: zero-prior global regulatory effect learning

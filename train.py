@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-GeneMamba training entry.
+Hayat training entry.
 Usage:
   python train.py                        # default: ../data
   python train.py --data_dir Schmidt   # use Schmidt dataset
